@@ -21,6 +21,7 @@ export function MapView() {
       center: [lon, lat],
       zoom,
     })
+    map.on('error', (event) => console.error('MapLibre error:', event.error))
     map.addControl(new maplibregl.NavigationControl(), 'top-right')
     return () => map.remove()
   }, [])
