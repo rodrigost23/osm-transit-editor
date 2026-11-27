@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { config } from './config'
+import { config } from '@/core/config'
 
 describe('config', () => {
   it('opens on the world map, below the minimum line zoom', () => {

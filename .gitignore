@@ -23,5 +23,11 @@ dist-ssr
 *.sln
 *.sw?
 
+
+# Build and test output
 coverage
+
+# Local environment (keep the example)
 .env
+.env.*
+!.env.example

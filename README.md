@@ -6,7 +6,7 @@ A web editor for OpenStreetMap public transport (PTv2) relations, starting with 
 
 ## Running locally
 
-Requires Node 22 or newer.
+Requires Node 24 (LTS) or newer.
 
 ```sh
 npm install
@@ -21,19 +21,30 @@ npm run dev
 | `npm run typecheck` | strict TypeScript |
 | `npm run lint` | oxlint |
 | `npm test` | Vitest tests |
-| `npm run test:coverage` | tests with coverage of `src/core` |
+| `npm run test:coverage` | tests with coverage of `src/core` (85% lines and branches) |
 
-Endpoints are configured through environment variables. Copy `.env.example` to `.env` to change them.
+## Configuration
+
+Copy `.env.example` to `.env` to change the base path or the OSM, Overpass and Nominatim endpoints. The Content Security Policy only allows the endpoints configured there, so changing one means rebuilding.
 
 ## Structure
 
 - `src/core`: plain TypeScript (data, model, rules). It must not import React; the linter enforces this.
 - `src/ui`: React components and the map (MapLibre GL).
 - `src/app`: app entry point and routing.
+- `tests/unit`: unit tests for `src/core`.
 
 ## Deployment
 
-Every push to `main` runs CI (`.github/workflows/ci.yml`) and deploys to GitHub Pages (`.github/workflows/deploy.yml`).
+Every push to `main` runs CI (`.github/workflows/ci.yml`) and deploys to GitHub Pages (`.github/workflows/deploy.yml`). In the repository settings, set **Pages > Source** to **GitHub Actions**.
+
+## Privacy
+
+The text you search for and the visible map area are sent to Nominatim and Overpass. Map tiles come from OpenFreeMap. There is no telemetry.
+
+## Overpass payload
+
+To be measured with Rio de Janeiro at the end of milestone 0 and recorded here.
 
 ## Data and license
 

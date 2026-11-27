@@ -1,4 +1,4 @@
-import { MapView } from '@/ui/MapView'
+import { MapView } from '@/ui/map/MapView'
 
 export default function App() {
   return <MapView />

@@ -1,10 +1,9 @@
-const env = import.meta.env ?? {}
-
+// Constants and endpoints. Endpoint defaults are applied in vite.config.ts
+// so the Content Security Policy and the app always agree on the origins.
 export const config = {
-  osmApiUrl: env.VITE_OSM_API_URL ?? 'https://api.openstreetmap.org',
-  overpassUrl: env.VITE_OVERPASS_URL ?? 'https://overpass-api.de/api/interpreter',
-  nominatimUrl: env.VITE_NOMINATIM_URL ?? 'https://nominatim.openstreetmap.org',
-  basemapStyleUrl: 'https://tiles.openfreemap.org/styles/liberty',
+  osmApiUrl: import.meta.env.VITE_OSM_API_URL,
+  overpassUrl: import.meta.env.VITE_OVERPASS_URL,
+  nominatimUrl: import.meta.env.VITE_NOMINATIM_URL,
   /** Minimum zoom to query lines from Overpass. To be tuned while testing milestone 0. */
   minLineZoom: 12,
   /** Initial view: world map, without asking for geolocation. */
