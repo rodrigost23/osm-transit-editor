@@ -50,8 +50,9 @@ export interface FetchOptions {
 const QUERY_TIMEOUT_S = 10
 const TIMEOUT_MS = 10_000
 const HEDGE_MS = 2_500
-// Statuses that mean a busy or overloaded server. Other statuses come from the query itself.
-const RETRYABLE_STATUS = new Set([429, 502, 503, 504])
+// A 400 means the query itself is malformed, so every server would refuse it. Any other
+// failure (406, 403, 5xx, 429, timeout, network) is specific to one server, so the next one is tried.
+const QUERY_REJECTED_STATUS = 400
 // A server that failed is skipped for this long. Retry-After can lengthen it, up to the cap.
 const COOLDOWN_MS = 60_000
 const COOLDOWN_MAX_MS = 120_000
@@ -135,8 +136,8 @@ function retryAfterMs(response: Response): number {
 /**
  * Fetches subway routes. The first server is asked at once. When it has not answered
  * after hedgeMs, or when it fails, the next server is asked too. The first valid answer
- * wins, and the others are cancelled. Errors another server would not fix (such as a
- * rejected query) stop at once.
+ * wins, and the others are cancelled. Only a rejected query (400) stops the search,
+ * because every server would refuse it. Any other failure moves on to the next server.
  */
 export function fetchSubwayRoutes(
   endpoints: readonly string[],
@@ -194,7 +195,7 @@ export function fetchSubwayRoutes(
           inFlight--
           // Cancelled by us after another server answered, or by the caller.
           if (done) return
-          if (error instanceof OverpassStatusError && !RETRYABLE_STATUS.has(error.status)) {
+          if (error instanceof OverpassStatusError && error.status === QUERY_REJECTED_STATUS) {
             finish()
             reject(error)
             return

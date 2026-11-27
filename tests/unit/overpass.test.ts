@@ -174,6 +174,16 @@ describe('fetchSubwayRoutes', () => {
     expect(hosts(fetchFn)).toEqual(['a.test', 'b.test'])
   })
 
+  it('moves on from a 406 or 403 from one server, since it is specific to that server', async () => {
+    const fetchFn = vi.fn<FetchLike>(async (url) =>
+      url === 'https://a.test' ? new Response('not acceptable', { status: 406 }) : ok(),
+    )
+    expect(
+      await fetchSubwayRoutes(['https://a.test', 'https://b.test'], box, { fetchFn, hedgeMs: 1_000_000, memory: noMemory }),
+    ).toEqual(json)
+    expect(hosts(fetchFn)).toEqual(['a.test', 'b.test'])
+  })
+
   it('stops at once on an error another server would not fix', async () => {
     const fetchFn = vi.fn<FetchLike>(async () => new Response('bad query', { status: 400 }))
     await expect(
