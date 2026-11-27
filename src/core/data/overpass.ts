@@ -66,10 +66,14 @@ export function resetEndpointCooldowns(): void {
   cooldownUntil.clear()
 }
 
-/** Overpass query for subway route relations inside the box, with member geometry. */
+/**
+ * Overpass query for subway route relations inside the box, with member geometry.
+ * A bounding box filter (not around), no "out meta" (the map does not show versions),
+ * and "qt" ordering, which Overpass serves faster than ordering by id.
+ */
 export function subwayRoutesQuery(box: BoundingBox, timeoutSeconds = QUERY_TIMEOUT_S): string {
   const bbox = [box.south, box.west, box.north, box.east].join(',')
-  return `[out:json][timeout:${timeoutSeconds}][maxsize:16777216];relation["route"="subway"](${bbox});out geom;`
+  return `[out:json][timeout:${timeoutSeconds}][maxsize:16777216];relation["route"="subway"](${bbox});out geom qt;`
 }
 
 /** Puts the remembered server first, if it is still in the list. Keeps the configured order otherwise. */

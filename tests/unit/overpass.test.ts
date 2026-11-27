@@ -27,7 +27,7 @@ afterEach(() => vi.unstubAllGlobals())
 describe('subway routes query', () => {
   it('asks for subway routes in the box with member geometry and a size limit', () => {
     expect(subwayRoutesQuery(box)).toBe(
-      '[out:json][timeout:10][maxsize:16777216];relation["route"="subway"](-23,-43.3,-22.8,-43.1);out geom;',
+      '[out:json][timeout:10][maxsize:16777216];relation["route"="subway"](-23,-43.3,-22.8,-43.1);out geom qt;',
     )
   })
 })
