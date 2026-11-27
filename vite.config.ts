@@ -7,7 +7,7 @@ import { defineConfig } from 'vitest/config'
 const endpointDefaults = {
   VITE_OSM_API_URL: 'https://api.openstreetmap.org',
   VITE_OVERPASS_URLS:
-    'https://overpass-api.de/api/interpreter,https://overpass.private.coffee/api/interpreter,https://overpass.kumi.systems/api/interpreter',
+    'https://overpass.kumi.systems/api/interpreter,https://overpass.private.coffee/api/interpreter,https://overpass-api.de/api/interpreter',
   VITE_NOMINATIM_URL: 'https://nominatim.openstreetmap.org',
 }
 type EndpointKey = keyof typeof endpointDefaults

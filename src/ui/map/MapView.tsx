@@ -3,7 +3,7 @@ import * as maplibregl from 'maplibre-gl'
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { config } from '@/core/config'
-import { fetchSubwayRoutes } from '@/core/data/overpass'
+import { fetchSubwayRoutes, localEndpointMemory } from '@/core/data/overpass'
 import { gridToBox, RouteCache, snapToGrid } from '@/core/data/route-cache'
 import { routesToGeoJSON, type RouteCollection } from '@/core/data/geojson'
 import { formatHash, parseHash } from '@/core/map/position'
@@ -23,6 +23,7 @@ export function MapView() {
   const container = useRef<HTMLDivElement>(null)
   const retry = useRef<() => void>(() => {})
   const [zoomedOut, setZoomedOut] = useState(false)
+  const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState(false)
 
   useEffect(() => {
@@ -38,6 +39,7 @@ export function MapView() {
     // Each new query cancels the one still in flight, so only the latest view can update the map.
     let controller: AbortController | undefined
     const routeCache = new RouteCache()
+    const memory = localEndpointMemory()
     let debounce: ReturnType<typeof setTimeout> | undefined
     const loadLines = async () => {
       const source = map.getSource<maplibregl.GeoJSONSource>(SOURCE_ID)
@@ -46,6 +48,7 @@ export function MapView() {
       if (map.getZoom() < config.minLineZoom) {
         source.setData(emptyRoutes)
         setZoomedOut(true)
+        setLoading(false)
         setLoadError(false)
         return
       }
@@ -59,17 +62,27 @@ export function MapView() {
         north: bounds.getNorth(),
         east: bounds.getEast(),
       })
+      const cached = routeCache.find(grid)
+      if (cached) {
+        source.setData(routesToGeoJSON(cached))
+        setLoading(false)
+        setLoadError(false)
+        return
+      }
+      setLoading(true)
       try {
-        let response = routeCache.find(grid)
-        if (!response) {
-          response = await fetchSubwayRoutes(config.overpassUrls, gridToBox(grid), { signal: current.signal })
-          routeCache.store(grid, response)
-        }
+        const response = await fetchSubwayRoutes(config.overpassUrls, gridToBox(grid), {
+          signal: current.signal,
+          memory,
+        })
+        routeCache.store(grid, response)
         source.setData(routesToGeoJSON(response))
+        setLoading(false)
         setLoadError(false)
       } catch (error) {
         if (current.signal.aborted) return
         console.error('Could not load subway routes:', error)
+        setLoading(false)
         setLoadError(true)
       }
     }
@@ -114,6 +127,7 @@ export function MapView() {
     <>
       <div ref={container} className="map" style={{ position: 'absolute', inset: 0 }} />
       {zoomedOut && <p className="zoom-hint">Zoom in to see lines.</p>}
+      {loading && !zoomedOut && !loadError && <p className="zoom-hint">Loading lines…</p>}
       {loadError && (
         <div className="map-notice" role="alert">
           <span>Could not load lines. The data service may be busy.</span>
