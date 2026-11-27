@@ -2,7 +2,8 @@
 // so the Content Security Policy and the app always agree on the origins.
 export const config = {
   osmApiUrl: import.meta.env.VITE_OSM_API_URL,
-  overpassUrl: import.meta.env.VITE_OVERPASS_URL,
+  /** Overpass endpoints in order of preference; the client falls back when one is busy. */
+  overpassUrls: import.meta.env.VITE_OVERPASS_URLS.split(",").map((url) => url.trim()).filter(Boolean),
   nominatimUrl: import.meta.env.VITE_NOMINATIM_URL,
   /** Minimum zoom to query lines from Overpass. To be tuned against real use. */
   minLineZoom: 12,

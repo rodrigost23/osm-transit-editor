@@ -2,7 +2,7 @@
 
 interface ImportMetaEnv {
   readonly VITE_OSM_API_URL: string
-  readonly VITE_OVERPASS_URL: string
+  readonly VITE_OVERPASS_URLS: string
   readonly VITE_NOMINATIM_URL: string
   readonly VITE_OSM_CLIENT_ID_PROD?: string
   readonly VITE_OSM_CLIENT_ID_DEV?: string

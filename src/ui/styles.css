@@ -109,3 +109,30 @@ body {
   box-shadow: var(--panel-shadow);
   pointer-events: none;
 }
+
+.map-notice {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: calc(100% - 32px);
+  padding: 6px 8px 6px 12px;
+  border-radius: 6px;
+  background: var(--panel-bg);
+  color: var(--panel-fg);
+  font-size: 13px;
+  box-shadow: var(--panel-shadow);
+}
+
+.map-notice button {
+  padding: 4px 10px;
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  background: var(--field-bg);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}

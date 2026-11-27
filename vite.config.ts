@@ -6,7 +6,8 @@ import { defineConfig } from 'vitest/config'
 // Defaults for the data endpoints. Override them in .env (see .env.example).
 const endpointDefaults = {
   VITE_OSM_API_URL: 'https://api.openstreetmap.org',
-  VITE_OVERPASS_URL: 'https://overpass-api.de/api/interpreter',
+  VITE_OVERPASS_URLS:
+    'https://overpass-api.de/api/interpreter,https://overpass.private.coffee/api/interpreter,https://overpass.kumi.systems/api/interpreter',
   VITE_NOMINATIM_URL: 'https://nominatim.openstreetmap.org',
 }
 type EndpointKey = keyof typeof endpointDefaults
@@ -21,7 +22,7 @@ function contentSecurityPolicy(endpoints: Record<EndpointKey, string>): Plugin {
   const connectSrc = new Set([
     "'self'",
     basemapOrigin,
-    ...Object.values(endpoints).map((url) => new URL(url).origin),
+    ...Object.values(endpoints).flatMap((value) => value.split(",")).map((url) => new URL(url.trim()).origin),
   ])
   const policy = [
     "default-src 'self'",

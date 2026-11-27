@@ -14,11 +14,15 @@ maplibregl.setWorkerUrl(workerUrl)
 
 const SOURCE_ID = 'transit-routes'
 const LAYER_ID = 'transit-routes-line'
+// Wait for the map to settle before querying, so a fast pan or zoom sends one request.
+const MOVE_DEBOUNCE_MS = 400
 const emptyRoutes: RouteCollection = { type: 'FeatureCollection', features: [] }
 
 export function MapView() {
   const container = useRef<HTMLDivElement>(null)
+  const retry = useRef<() => void>(() => {})
   const [zoomedOut, setZoomedOut] = useState(false)
+  const [loadError, setLoadError] = useState(false)
 
   useEffect(() => {
     if (!container.current) return
@@ -30,32 +34,39 @@ export function MapView() {
       zoom: start.zoom,
     })
 
-    // Only the newest request may update the map, so a slow response cannot
-    // overwrite the lines for a later view.
-    let requestId = 0
+    // Each new query cancels the one still in flight, so only the latest view can update the map.
+    let controller: AbortController | undefined
+    let debounce: ReturnType<typeof setTimeout> | undefined
     const loadLines = async () => {
       const source = map.getSource<maplibregl.GeoJSONSource>(SOURCE_ID)
       if (!source) return
-      const id = ++requestId
+      controller?.abort()
       if (map.getZoom() < config.minLineZoom) {
         source.setData(emptyRoutes)
         setZoomedOut(true)
+        setLoadError(false)
         return
       }
       setZoomedOut(false)
+      const current = new AbortController()
+      controller = current
       const bounds = map.getBounds()
       try {
-        const response = await fetchSubwayRoutes(config.overpassUrl, {
+        const response = await fetchSubwayRoutes(config.overpassUrls, {
           south: bounds.getSouth(),
           west: bounds.getWest(),
           north: bounds.getNorth(),
           east: bounds.getEast(),
-        })
-        if (id === requestId) source.setData(routesToGeoJSON(response))
+        }, { signal: current.signal })
+        source.setData(routesToGeoJSON(response))
+        setLoadError(false)
       } catch (error) {
+        if (current.signal.aborted) return
         console.error('Could not load subway routes:', error)
+        setLoadError(true)
       }
     }
+    retry.current = () => void loadLines()
 
     // Keep the position in the hash so a reload or a shared link opens the same place.
     // replaceState does not fire hashchange, so this does not loop.
@@ -78,11 +89,16 @@ export function MapView() {
     })
     map.on('moveend', () => {
       writeHash()
-      void loadLines()
+      clearTimeout(debounce)
+      debounce = setTimeout(() => void loadLines(), MOVE_DEBOUNCE_MS)
     })
     map.on('error', (event) => console.error('MapLibre error:', event.error))
     map.addControl(new maplibregl.NavigationControl(), 'top-right')
-    return () => map.remove()
+    return () => {
+      clearTimeout(debounce)
+      controller?.abort()
+      map.remove()
+    }
   }, [])
 
   // Inline style: MapLibre's own stylesheet sets position: relative on the
@@ -91,6 +107,14 @@ export function MapView() {
     <>
       <div ref={container} className="map" style={{ position: 'absolute', inset: 0 }} />
       {zoomedOut && <p className="zoom-hint">Zoom in to see lines.</p>}
+      {loadError && (
+        <div className="map-notice" role="alert">
+          <span>Could not load lines. The data service may be busy.</span>
+          <button type="button" onClick={() => retry.current()}>
+            Try again
+          </button>
+        </div>
+      )}
     </>
   )
 }
