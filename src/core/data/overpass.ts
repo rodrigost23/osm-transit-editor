@@ -29,28 +29,34 @@ export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>
 
 export interface FetchOptions {
   fetchFn?: FetchLike
-  /** Cancels the whole request, including any retries. */
+  /** Cancels the whole request. */
   signal?: AbortSignal
-  /** Per-attempt timeout, in milliseconds. */
+  /** Per-server timeout, in milliseconds. */
   timeoutMs?: number
-  /** Waits between attempts. Replaceable in tests. */
-  wait?: (ms: number) => Promise<void>
+  /** Clock, replaceable in tests. */
+  now?: () => number
 }
 
 /** Overpass query for subway route relations inside the box, with member geometry. */
-export function subwayRoutesQuery(box: BoundingBox, timeoutSeconds = 25): string {
+export function subwayRoutesQuery(box: BoundingBox, timeoutSeconds = QUERY_TIMEOUT_S): string {
   const bbox = [box.south, box.west, box.north, box.east].join(',')
   return `[out:json][timeout:${timeoutSeconds}][maxsize:16777216];relation["route"="subway"](${bbox});out geom;`
 }
 
-// Statuses that usually mean a busy or overloaded server. Other errors come from the query itself.
+// Statuses that mean a busy or overloaded server. Other statuses come from the query itself.
 const RETRYABLE_STATUS = new Set([429, 502, 503, 504])
-const ATTEMPTS_PER_ENDPOINT = 2
-const RETRY_DELAY_MS = 1000
-const TIMEOUT_MS = 30_000
-// Rate limiting: honour Retry-After, capped, and fall back to a fixed pause when it is absent.
-const RATE_LIMIT_DEFAULT_MS = 5000
-const RATE_LIMIT_MAX_MS = 15_000
+const QUERY_TIMEOUT_S = 15
+const TIMEOUT_MS = 15_000
+// A server that failed is skipped for this long. Retry-After can lengthen it, up to the cap.
+const COOLDOWN_MS = 60_000
+const COOLDOWN_MAX_MS = 120_000
+
+const cooldownUntil = new Map<string, number>()
+
+/** Forgets which servers were skipped. Used by tests. */
+export function resetEndpointCooldowns(): void {
+  cooldownUntil.clear()
+}
 
 class OverpassStatusError extends Error {
   readonly status: number
@@ -63,46 +69,43 @@ class OverpassStatusError extends Error {
   }
 }
 
-/** Reads Retry-After (seconds) into milliseconds. Browsers only expose it when the server allows it. */
+/** Reads Retry-After (seconds) into milliseconds, or 0 when absent. Browsers only expose it when the server allows it. */
 function retryAfterMs(response: Response): number {
   const seconds = Number(response.headers.get('Retry-After'))
-  if (!Number.isFinite(seconds) || seconds <= 0) return RATE_LIMIT_DEFAULT_MS
-  return Math.min(seconds * 1000, RATE_LIMIT_MAX_MS)
+  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 0
 }
 
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
-
 /**
- * Fetches subway routes from the first endpoint that answers. Each endpoint gets
- * a short retry when it is busy, then the next endpoint is tried. Errors that a
- * different endpoint would not fix (such as a rejected query) stop at once.
+ * Fetches subway routes from the first server that answers. A server that is busy,
+ * times out or cannot be reached is skipped for a while and the next one is tried at
+ * once, without repeating the same server. Errors that another server would not fix
+ * (such as a rejected query) stop at once.
  */
 export async function fetchSubwayRoutes(
   endpoints: readonly string[],
   box: BoundingBox,
   options: FetchOptions = {},
 ): Promise<OverpassResponse> {
-  const { fetchFn = fetch, signal, timeoutMs = TIMEOUT_MS, wait = sleep } = options
+  const { fetchFn = fetch, signal, timeoutMs = TIMEOUT_MS, now = Date.now } = options
   const body = new URLSearchParams({ data: subwayRoutesQuery(box) })
-  // One entry per failed attempt, so the final error says which server failed and how.
+  // One entry per skipped server, so the final error says which server failed and how.
   const failures: string[] = []
 
   for (const endpoint of endpoints) {
-    for (let attempt = 1; attempt <= ATTEMPTS_PER_ENDPOINT; attempt++) {
-      if (signal?.aborted) throw new DOMException('Request cancelled', 'AbortError')
-      try {
-        return await requestOnce(fetchFn, endpoint, body, signal, timeoutMs)
-      } catch (error) {
-        if (signal?.aborted) throw error
-        if (error instanceof OverpassStatusError && !RETRYABLE_STATUS.has(error.status)) throw error
-        failures.push(`${new URL(endpoint).host}: ${error instanceof OverpassStatusError ? error.status : 'network error'}`)
-        if (error instanceof OverpassStatusError && error.status === 429) {
-          // Pause before any further request, so a rate limit is not answered with a burst to the next server.
-          await wait(error.retryAfterMs)
-          continue
-        }
-      }
-      if (attempt < ATTEMPTS_PER_ENDPOINT) await wait(RETRY_DELAY_MS * attempt)
+    if (signal?.aborted) throw new DOMException('Request cancelled', 'AbortError')
+    const host = new URL(endpoint).host
+    if ((cooldownUntil.get(endpoint) ?? 0) > now()) {
+      failures.push(`${host}: skipped, failed recently`)
+      continue
+    }
+    try {
+      return await requestOnce(fetchFn, endpoint, body, signal, timeoutMs)
+    } catch (error) {
+      if (signal?.aborted) throw error
+      if (error instanceof OverpassStatusError && !RETRYABLE_STATUS.has(error.status)) throw error
+      const retryAfter = error instanceof OverpassStatusError ? error.retryAfterMs : 0
+      cooldownUntil.set(endpoint, now() + Math.min(retryAfter || COOLDOWN_MS, COOLDOWN_MAX_MS))
+      failures.push(`${host}: ${error instanceof OverpassStatusError ? error.status : 'timeout or network error'}`)
     }
   }
   throw new Error(`All Overpass endpoints failed (${failures.join('; ') || 'none configured'})`)
