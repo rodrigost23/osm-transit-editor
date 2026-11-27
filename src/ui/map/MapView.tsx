@@ -4,6 +4,7 @@ import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { config } from '@/core/config'
 import { fetchSubwayRoutes } from '@/core/data/overpass'
+import { gridToBox, RouteCache, snapToGrid } from '@/core/data/route-cache'
 import { routesToGeoJSON, type RouteCollection } from '@/core/data/geojson'
 import { formatHash, parseHash } from '@/core/map/position'
 import { baseStyleUrl } from './base-style'
@@ -36,6 +37,7 @@ export function MapView() {
 
     // Each new query cancels the one still in flight, so only the latest view can update the map.
     let controller: AbortController | undefined
+    const routeCache = new RouteCache()
     let debounce: ReturnType<typeof setTimeout> | undefined
     const loadLines = async () => {
       const source = map.getSource<maplibregl.GeoJSONSource>(SOURCE_ID)
@@ -51,13 +53,18 @@ export function MapView() {
       const current = new AbortController()
       controller = current
       const bounds = map.getBounds()
+      const grid = snapToGrid({
+        south: bounds.getSouth(),
+        west: bounds.getWest(),
+        north: bounds.getNorth(),
+        east: bounds.getEast(),
+      })
       try {
-        const response = await fetchSubwayRoutes(config.overpassUrls, {
-          south: bounds.getSouth(),
-          west: bounds.getWest(),
-          north: bounds.getNorth(),
-          east: bounds.getEast(),
-        }, { signal: current.signal })
+        let response = routeCache.find(grid)
+        if (!response) {
+          response = await fetchSubwayRoutes(config.overpassUrls, gridToBox(grid), { signal: current.signal })
+          routeCache.store(grid, response)
+        }
         source.setData(routesToGeoJSON(response))
         setLoadError(false)
       } catch (error) {
