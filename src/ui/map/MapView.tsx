@@ -16,6 +16,14 @@ import { LineCard } from './LineCard'
 // not emit. Pointing it at the bundled asset keeps the worker under the base path.
 maplibregl.setWorkerUrl(workerUrl)
 
+/** A place the map should move to. A new id moves the map, even to the same place. */
+export interface MapTarget {
+  lat: number
+  lon: number
+  zoom: number
+  id: number
+}
+
 const SOURCE_ID = 'transit-routes'
 const LAYER_ID = 'transit-routes-line'
 const LABEL_ID = 'transit-routes-label'
@@ -23,8 +31,9 @@ const LABEL_ID = 'transit-routes-label'
 const MOVE_DEBOUNCE_MS = 400
 const emptyRoutes: RouteCollection = { type: 'FeatureCollection', features: [] }
 
-export function MapView() {
+export function MapView({ target }: { target?: MapTarget }) {
   const container = useRef<HTMLDivElement>(null)
+  const mapRef = useRef<maplibregl.Map | null>(null)
   const retry = useRef<() => void>(() => {})
   const [zoomedOut, setZoomedOut] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -43,6 +52,7 @@ export function MapView() {
       center: [start.lon, start.lat],
       zoom: start.zoom,
     })
+    mapRef.current = map
 
     // Each new view cancels the request still in flight, so only the latest view can update the map.
     let controller: AbortController | undefined
@@ -151,9 +161,15 @@ export function MapView() {
     return () => {
       clearTimeout(debounce)
       controller?.abort()
+      mapRef.current = null
       map.remove()
     }
   }, [])
+
+  // A place chosen in the search moves the map there. The map then loads the lines of the new view.
+  useEffect(() => {
+    if (target) mapRef.current?.flyTo({ center: [target.lon, target.lat], zoom: target.zoom })
+  }, [target])
 
   const selected = known.find((route) => route.id === selectedId)
 
