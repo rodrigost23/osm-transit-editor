@@ -298,3 +298,36 @@ body {
   font-size: 12px;
   color: var(--panel-muted);
 }
+
+/* MapLibre's own controls (zoom, compass) use the same card look as the panels. */
+.maplibregl-ctrl-group {
+  overflow: hidden;
+  border: 1px solid var(--border) !important;
+  border-radius: 10px !important;
+  background: var(--card) !important;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 10%) !important;
+}
+
+.maplibregl-ctrl-group button {
+  width: 34px !important;
+  height: 34px !important;
+  border-bottom: 1px solid var(--border) !important;
+}
+
+.maplibregl-ctrl-group button:last-child {
+  border-bottom: 0 !important;
+}
+
+.maplibregl-ctrl-group button .maplibregl-ctrl-icon {
+  background-size: 16px !important;
+  filter: var(--icon-filter, none);
+}
+
+:root[data-theme="dark"] .maplibregl-ctrl-group button .maplibregl-ctrl-icon,
+:root:not([data-theme="light"]) .maplibregl-ctrl-group button .maplibregl-ctrl-icon {
+  filter: invert(0.9);
+}
+
+.maplibregl-ctrl-attrib {
+  border-radius: 8px;
+}

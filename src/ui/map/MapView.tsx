@@ -1,4 +1,3 @@
-import { Button } from '@/ui/components/ui/button'
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react'
 import * as maplibregl from 'maplibre-gl'
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url'
@@ -65,13 +64,14 @@ interface MapViewProps {
   setSelectedId: Dispatch<SetStateAction<number | null>>
   /** The routes with a point in the visible area, for the list of lines on screen. */
   setVisible: Dispatch<SetStateAction<RouteSource[]>>
+  /** Set by the map to reload the visible area. The panel calls it from its own button. */
+  reloadRef: { current: () => void }
 }
 
-export function MapView({ target, known, setKnown, selectedId, setSelectedId, setVisible }: MapViewProps) {
+export function MapView({ target, known, setKnown, selectedId, setSelectedId, setVisible, reloadRef }: MapViewProps) {
   const container = useRef<HTMLDivElement>(null)
   const mapRef = useRef<maplibregl.Map | null>(null)
   const retry = useRef<() => void>(() => {})
-  const reload = useRef<() => void>(() => {})
   // Seconds until the OSM API is asked again after a rate limit, or null when no cooldown is running.
   const [waitSeconds, setWaitSeconds] = useState<number | null>(null)
   const [zoomedOut, setZoomedOut] = useState(false)
@@ -191,7 +191,7 @@ export function MapView({ target, known, setKnown, selectedId, setSelectedId, se
       }
     }
     retry.current = () => void loadLines()
-    reload.current = () => void loadLines(true)
+    reloadRef.current = () => void loadLines(true)
 
     // Keep the position in the hash so a reload or a shared link opens the same place.
     // replaceState does not fire hashchange, so this does not loop.
@@ -305,7 +305,7 @@ export function MapView({ target, known, setKnown, selectedId, setSelectedId, se
       mapRef.current = null
       map.remove()
     }
-  }, [setKnown, setSelectedId, setVisible])
+  }, [setKnown, setSelectedId, setVisible, reloadRef])
 
   // A place or line chosen in the search moves the map there. The map then loads the lines of the new view.
   useEffect(() => {
@@ -325,11 +325,6 @@ export function MapView({ target, known, setKnown, selectedId, setSelectedId, se
         <p className="zoom-hint" role="status">
           Rate limited by OpenStreetMap, retrying in {waitSeconds} s.
         </p>
-      )}
-      {!zoomedOut && (
-        <Button variant="outline" size="sm" className="absolute bottom-3 left-3 z-10 bg-card shadow-md" onClick={() => reload.current()}>
-          Reload visible area
-        </Button>
       )}
       {selected && (
         <LineCard line={selected} variants={lineVariants(known, selected.id)} onClose={() => setSelectedId(null)} />

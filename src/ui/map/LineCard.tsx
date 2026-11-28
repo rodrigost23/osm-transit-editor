@@ -12,28 +12,35 @@ interface LineCardProps {
 
 export function LineCard({ line, variants, onClose }: LineCardProps) {
   const ref = line.tags.ref ?? ''
+  // Several routes can share one direction; list each direction once.
+  const directions = [...new Set(variants.map((v) => (v.tags.from && v.tags.to ? `${v.tags.from} → ${v.tags.to}` : lineName(v))))]
   return (
-    <Card aria-label={lineName(line)} className="absolute bottom-4 left-4 z-10 max-h-1/2 w-[min(320px,calc(100%-32px))] gap-0 overflow-auto p-4">
-      <header className="flex items-center gap-2.5">
+    <Card aria-label={lineName(line)} className="absolute bottom-3 left-3 z-10 max-h-1/2 w-[min(340px,calc(100%-24px))] gap-0 overflow-auto rounded-2xl p-0 shadow-xl">
+      <header className="flex items-start gap-3 border-b border-border p-4">
         <span
-          className="min-w-7 rounded-md px-1.5 py-0.5 text-center text-xs font-bold text-white"
+          className="mt-0.5 inline-flex h-7 min-w-7 items-center justify-center rounded-lg px-2 text-sm font-bold text-white"
           style={{ background: lineColour(line) }}
         >
           {ref || '?'}
         </span>
-        <strong className="text-sm font-semibold leading-snug">{lineName(line)}</strong>
-        <Button variant="ghost" size="sm" className="-mr-2 ml-auto h-7 w-7 p-0 text-lg" onClick={onClose} aria-label="Close">
+        <div className="min-w-0 flex-1">
+          <h2 className="text-sm leading-snug font-semibold">{lineName(line)}</h2>
+          {line.tags.operator && <p className="mt-0.5 text-xs text-muted-foreground">{line.tags.operator}</p>}
+        </div>
+        <Button variant="ghost" size="sm" className="-mt-1 -mr-2 h-8 w-8 p-0 text-lg text-muted-foreground" onClick={onClose} aria-label="Close">
           ×
         </Button>
       </header>
-      {line.tags.operator && <p className="mt-1 text-xs text-muted-foreground">{line.tags.operator}</p>}
-      <ul className="mt-2 divide-y divide-border">
-        {variants.map((variant) => (
-          <li key={variant.id} className="py-1.5 text-sm text-muted-foreground">
-            {variant.tags.from && variant.tags.to ? `${variant.tags.from} → ${variant.tags.to}` : lineName(variant)}
-          </li>
-        ))}
-      </ul>
+      <div className="p-2">
+        <p className="px-2 pt-1 pb-2 text-xs font-medium tracking-wide text-muted-foreground uppercase">Directions</p>
+        <ul className="grid gap-1">
+          {directions.map((direction) => (
+            <li key={direction} className="rounded-lg bg-muted/60 px-3 py-2 text-sm">
+              {direction}
+            </li>
+          ))}
+        </ul>
+      </div>
     </Card>
   )
 }
