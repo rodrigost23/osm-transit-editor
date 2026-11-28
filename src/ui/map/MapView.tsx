@@ -40,6 +40,7 @@ const OVERVIEW_LAYER_ID = 'transit-overview-line'
 const BADGE_SOURCE_ID = 'transit-badges'
 const BADGE_LAYER_ID = 'transit-badges-circle'
 const BADGE_TEXT_ID = 'transit-badges-ref'
+const BADGE_MODE_ID = 'transit-badges-mode'
 const STOP_SOURCE_ID = 'transit-stops'
 const STOP_LAYER_ID = 'transit-stops-circle'
 const STOP_LABEL_ID = 'transit-stops-name'
@@ -247,6 +248,15 @@ export function MapView({ target, known, setKnown, selectedId, setSelectedId }: 
         minzoom: BADGE_MIN_ZOOM,
         layout: { 'text-field': ['get', 'ref'], 'text-font': ['Noto Sans Regular'], 'text-size': 11, 'text-allow-overlap': true },
         paint: { 'text-color': ['get', 'textColour'] },
+      })
+      // The mode, as a short word above the badge.
+      map.addLayer({
+        id: BADGE_MODE_ID,
+        type: 'symbol',
+        source: BADGE_SOURCE_ID,
+        minzoom: BADGE_MIN_ZOOM,
+        layout: { 'text-field': ['get', 'mode'], 'text-font': ['Noto Sans Regular'], 'text-size': 10, 'text-offset': [0, -1.6], 'text-allow-overlap': true },
+        paint: { 'text-color': '#5c5c63', 'text-halo-color': '#ffffff', 'text-halo-width': 1.5 },
       })
       map.on('click', LAYER_ID, (event) => {
         const id = Number(event.features?.[0]?.properties?.relationId)

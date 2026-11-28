@@ -102,6 +102,22 @@ export function contrastText(colour: string): '#000000' | '#ffffff' {
   return (0.299 * r + 0.587 * g + 0.114 * b) / 255 > 0.6 ? '#000000' : '#ffffff'
 }
 
+const MODE_LABELS: Record<string, string> = {
+  subway: 'Metro',
+  light_rail: 'Light rail',
+  tram: 'Tram',
+  train: 'Train',
+  bus: 'Bus',
+  ferry: 'Ferry',
+  monorail: 'Monorail',
+}
+
+/** A short name for the mode of a route, from its route tag. Unknown modes show the tag itself. */
+export function modeLabel(route: RouteSource): string {
+  const mode = route.tags.route ?? ''
+  return MODE_LABELS[mode] ?? mode
+}
+
 /** The middle vertex of the longest line of a route, where its badge is drawn. */
 function badgePoint(route: RouteSource): [number, number] | null {
   let longest: [number, number][] | undefined
@@ -132,7 +148,7 @@ export function badgesToGeoJSON(routes: readonly RouteSource[]): PointCollection
         {
           type: 'Feature' as const,
           geometry: { type: 'Point' as const, coordinates: point },
-          properties: { ref: group[0].tags.ref ?? '', colour, textColour: contrastText(colour) },
+          properties: { ref: group[0].tags.ref ?? '', colour, textColour: contrastText(colour), mode: modeLabel(group[0]) },
         },
       ]
     }),

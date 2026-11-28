@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { badgesToGeoJSON, contrastText, linesToGeoJSON, stopsToGeoJSON, type RouteSource } from '@/core/data/geojson'
+import { badgesToGeoJSON, contrastText, linesToGeoJSON, modeLabel, stopsToGeoJSON, type RouteSource } from '@/core/data/geojson'
 import { parseOsmJson } from '@/core/data/osm-json'
 import { relationRoute } from '@/core/data/route-loader'
 
@@ -87,7 +87,7 @@ describe('badgesToGeoJSON', () => {
     ])
     expect(collection.features).toHaveLength(1)
     expect(collection.features[0].geometry.coordinates).toEqual([6, 6])
-    expect(collection.features[0].properties).toEqual({ ref: '1', colour: '#ffffff', textColour: '#000000' })
+    expect(collection.features[0].properties).toEqual({ ref: '1', colour: '#ffffff', textColour: '#000000', mode: '' })
   })
 })
 
@@ -129,5 +129,14 @@ describe('linesToGeoJSON', () => {
   it('draws every line of routes saved without way ids', () => {
     const route: RouteSource = { id: 1, tags: {}, lines: [[[0, 0], [1, 1]]] }
     expect(linesToGeoJSON([route, { ...route, id: 2 }]).features[0].geometry.coordinates).toHaveLength(2)
+  })
+})
+
+describe('modeLabel', () => {
+  it('names the mode from the route tag, and keeps unknown tags as they are', () => {
+    expect(modeLabel({ id: 1, tags: { route: 'tram' }, lines: [] })).toBe('Tram')
+    expect(modeLabel({ id: 2, tags: { route: 'subway' }, lines: [] })).toBe('Metro')
+    expect(modeLabel({ id: 3, tags: { route: 'funicular' }, lines: [] })).toBe('funicular')
+    expect(modeLabel({ id: 4, tags: {}, lines: [] })).toBe('')
   })
 })
