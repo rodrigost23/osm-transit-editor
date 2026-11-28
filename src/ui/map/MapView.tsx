@@ -13,12 +13,11 @@ import {
   type RouteSource,
 } from '@/core/data/geojson'
 import { IndexedDbStore } from '@/core/data/idb-store'
-import { lineVariants, routesInView } from '@/core/data/lines'
+import { routesInView } from '@/core/data/lines'
 import { describeError, RouteLoader } from '@/core/data/route-loader'
 import { LayeredStore, MemoryStore } from '@/core/data/store'
 import { formatHash, parseHash } from '@/core/map/position'
 import { baseStyleUrl } from './base-style'
-import { LineCard } from './LineCard'
 
 // MapLibre 6 resolves its worker next to its own module, which a bundler does
 // not emit. Pointing it at the bundled asset keeps the worker under the base path.
@@ -56,11 +55,7 @@ const emptyPoints: PointCollection = { type: 'FeatureCollection', features: [] }
 
 interface MapViewProps {
   target?: MapTarget
-  /** Every route loaded so far. The parent keeps it, so it can search them. */
-  known: RouteSource[]
   setKnown: Dispatch<SetStateAction<RouteSource[]>>
-  /** The line the user picked, on the map or in the search. */
-  selectedId: number | null
   setSelectedId: Dispatch<SetStateAction<number | null>>
   /** The routes with a point in the visible area, for the list of lines on screen. */
   setVisible: Dispatch<SetStateAction<RouteSource[]>>
@@ -68,7 +63,7 @@ interface MapViewProps {
   reloadRef: { current: () => void }
 }
 
-export function MapView({ target, known, setKnown, selectedId, setSelectedId, setVisible, reloadRef }: MapViewProps) {
+export function MapView({ target, setKnown, setSelectedId, setVisible, reloadRef }: MapViewProps) {
   const container = useRef<HTMLDivElement>(null)
   const mapRef = useRef<maplibregl.Map | null>(null)
   const retry = useRef<() => void>(() => {})
@@ -312,7 +307,6 @@ export function MapView({ target, known, setKnown, selectedId, setSelectedId, se
     if (target) mapRef.current?.flyTo({ center: [target.lon, target.lat], zoom: target.zoom })
   }, [target])
 
-  const selected = known.find((route) => route.id === selectedId)
 
   // Inline style: MapLibre's own stylesheet sets position: relative on the
   // container with the same specificity, which would collapse the map to 0px.
@@ -325,9 +319,6 @@ export function MapView({ target, known, setKnown, selectedId, setSelectedId, se
         <p className="zoom-hint" role="status">
           Rate limited by OpenStreetMap, retrying in {waitSeconds} s.
         </p>
-      )}
-      {selected && (
-        <LineCard line={selected} variants={lineVariants(known, selected.id)} onClose={() => setSelectedId(null)} />
       )}
       {loadError && (
         <div className="map-notice" role="alert">

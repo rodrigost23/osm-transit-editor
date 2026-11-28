@@ -1,10 +1,12 @@
 import { useRef, useState, type FormEvent } from 'react'
 import { config } from '@/core/config'
-import { modeLabel, type RouteSource } from '@/core/data/geojson'
-import { groupLines, lineColour, lineName, routeCentre } from '@/core/data/lines'
+import { modeLabel, type RouteSource, type Stop } from '@/core/data/geojson'
+import { groupLines, lineColour, lineName, lineVariants, routeCentre } from '@/core/data/lines'
 import { searchPlace } from '@/core/data/nominatim'
 import { describeError } from '@/core/data/route-loader'
 import { MapView, type MapTarget } from '@/ui/map/MapView'
+import { LinePanel } from '@/ui/map/LinePanel'
+import { StationPanel } from '@/ui/map/StationPanel'
 import { Badge } from '@/ui/components/ui/badge'
 import { Button } from '@/ui/components/ui/button'
 import { Card } from '@/ui/components/ui/card'
@@ -19,11 +21,24 @@ export function StartScreen() {
   const [known, setKnown] = useState<RouteSource[]>([])
   const [visible, setVisible] = useState<RouteSource[]>([])
   const [selectedId, setSelectedId] = useState<number | null>(null)
+  const [selectedStop, setSelectedStop] = useState<Stop | null>(null)
   const lines = groupLines(visible)
   const reloadRef = useRef<() => void>(() => {})
+  const selectedRoute = known.find((route) => route.id === selectedId)
+  const variants = selectedRoute ? lineVariants(known, selectedRoute.id) : []
+  const stationList = selectedRoute ? (selectedRoute.stops ?? []).filter((stop) => stop.name) : []
+  const stationIndex = selectedStop ? stationList.findIndex((stop) => stop.key === selectedStop.key) : -1
+
+  // A station moves the map to it and opens its panel.
+  const chooseStop = (stop: Stop) => {
+    setSelectedStop(stop)
+    setTarget({ lat: stop.lat, lon: stop.lon, zoom: 15, id: Date.now() })
+  }
+
 
   // Picking a line opens its card and moves the map to the middle of the line.
   const chooseLine = (group: RouteSource[]) => {
+    setSelectedStop(null)
     setSelectedId(group[0].id)
     const centre = routeCentre(group[0])
     if (centre) setTarget({ ...centre, zoom: 13, id: Date.now() })
@@ -53,13 +68,27 @@ export function StartScreen() {
     <>
       <MapView
         target={target}
-        known={known}
         setKnown={setKnown}
-        selectedId={selectedId}
         setSelectedId={setSelectedId}
         setVisible={setVisible}
         reloadRef={reloadRef}
       />
+      {selectedRoute ? (
+        <LinePanel
+          line={selectedRoute}
+          variants={variants}
+          selectedStopKey={selectedStop?.key ?? null}
+          onChooseVariant={(variant) => {
+            setSelectedStop(null)
+            setSelectedId(variant.id)
+          }}
+          onChooseStop={chooseStop}
+          onBack={() => {
+            setSelectedStop(null)
+            setSelectedId(null)
+          }}
+        />
+      ) : (
       <Card className="absolute top-4 left-4 z-10 w-[min(320px,calc(100vw-32px))] gap-0 p-4">
         <header className="mb-3 flex items-baseline justify-between">
           <span className="text-base font-semibold tracking-tight">OSM Transit Editor</span>
@@ -120,6 +149,15 @@ export function StartScreen() {
           Place search by Nominatim. Map data © OpenStreetMap contributors.
         </p>
       </Card>
+      )}
+      {selectedRoute && selectedStop && stationIndex >= 0 && (
+        <StationPanel
+          stop={selectedStop}
+          position={stationIndex + 1}
+          total={stationList.length}
+          onClose={() => setSelectedStop(null)}
+        />
+      )}
     </>
   )
 }
