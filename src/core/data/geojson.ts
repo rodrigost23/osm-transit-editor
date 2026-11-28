@@ -68,15 +68,19 @@ export class RouteChangeTracker {
   }
 }
 
-/** One point per station, shared stations drawn once, in the colour of the first route (by id) that serves them. */
+/**
+ * One point per station. Stops with the same name are one station, drawn once, in the colour of the
+ * first route (by id) that serves them. Unnamed stops are kept apart by their node.
+ */
 export function stopsToGeoJSON(routes: readonly RouteSource[]): PointCollection {
   const seen = new Set<string>()
   const features: PointFeature[] = []
   for (const route of [...routes].sort((a, b) => a.id - b.id)) {
     const { colour } = resolveColour(route.tags.colour)
     for (const stop of route.stops ?? []) {
-      if (seen.has(stop.key)) continue
-      seen.add(stop.key)
+      const identity = stop.name ? `name:${stop.name}` : stop.key
+      if (seen.has(identity)) continue
+      seen.add(identity)
       features.push({
         type: 'Feature',
         geometry: { type: 'Point', coordinates: [stop.lon, stop.lat] },
