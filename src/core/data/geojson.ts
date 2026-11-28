@@ -236,6 +236,21 @@ export function linesToGeoJSON(routes: readonly RouteSource[]): OverviewCollecti
     })
   })
 
+  // Lines that share a way form one bundle. Each line keeps its lane in the whole bundle, so it does not
+  // step across its neighbours where the set of lines on a track changes. A line that leaves the bundle
+  // keeps its lane, and the stations stay on the centre of the bundle.
+  const parent = mains.map((_, index) => index)
+  const find = (index: number): number => (parent[index] === index ? index : (parent[index] = find(parent[index])))
+  for (const list of users.values()) for (const other of list) parent[find(other)] = find(list[0])
+  const bundles = new Map<number, number[]>()
+  mains.forEach((_, index) => bundles.set(find(index), [...(bundles.get(find(index)) ?? []), index]))
+  const laneOffset: number[] = mains.map(() => 0)
+  for (const members of bundles.values()) {
+    members.forEach((index, lane) => {
+      laneOffset[index] = (lane - (members.length - 1) / 2) * PARALLEL_SPACING
+    })
+  }
+
   const features: OverviewFeature[] = []
   mains.forEach(({ route, group }, index) => {
     const first = group[0]
@@ -243,14 +258,10 @@ export function linesToGeoJSON(routes: readonly RouteSource[]): OverviewCollecti
     route.lines.forEach((line, at) => {
       if (line.length < 2) return
       const way = route.ways?.[at]
-      let offset = 0
       let coordinates = line
-      if (way !== undefined) {
-        const sharing = users.get(way) ?? [index]
-        offset = (sharing.indexOf(index) - (sharing.length - 1) / 2) * PARALLEL_SPACING
-        const ref = reference.get(way)
-        if (ref && isReversed(line, ref)) coordinates = [...line].reverse()
-      }
+      const ref = way !== undefined ? reference.get(way) : undefined
+      if (ref && isReversed(line, ref)) coordinates = [...line].reverse()
+      const offset = laneOffset[index]
       features.push({
         type: 'Feature',
         geometry: { type: 'LineString', coordinates },

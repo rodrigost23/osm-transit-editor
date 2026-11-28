@@ -130,6 +130,13 @@ describe('linesToGeoJSON', () => {
     expect(offsets).toEqual([-2, 2, 0])
   })
 
+  it('keeps a line in the same lane when it leaves the shared track', () => {
+    const red: RouteSource = { id: 1, tags: { ref: 'R' }, lines: [[[0, 0], [1, 0]], [[1, 0], [2, 0]]], ways: [100, 200] }
+    const green: RouteSource = { id: 2, tags: { ref: 'G' }, lines: [[[0, 0], [1, 0]]], ways: [100] }
+    const collection = linesToGeoJSON([green, red])
+    expect(collection.features.map((feature) => feature.properties.offset)).toEqual([-2, -2, 2])
+  })
+
   it('spreads three lines on one track evenly', () => {
     const routes = [1, 2, 3].map((id): RouteSource => ({ id, tags: { ref: String(id) }, lines: [[[0, 0], [1, 0]]], ways: [100] }))
     expect(linesToGeoJSON(routes).features.map((feature) => feature.properties.offset)).toEqual([-4, 0, 4])
