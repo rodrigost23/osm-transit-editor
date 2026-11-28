@@ -21,7 +21,17 @@ import { formatHash, parseHash } from '@/core/map/position'
 import { LOCATE_TIMEOUT_MS, LOCATE_ZOOM, locateErrorMessage } from '@/core/map/locate'
 import { baseStyleUrl } from './base-style'
 import { ensurePillImage } from './station-pill'
-import { emphasize, litLines, litStations, opacityFor, type NumberPaint } from './highlight'
+import {
+  emphasize,
+  hoveredLineMatch,
+  hoveredStationMatch,
+  isActive,
+  litLines,
+  litStations,
+  opacityFor,
+  type Highlight,
+  type NumberPaint,
+} from './highlight'
 
 // MapLibre 6 resolves its worker next to its own module, which a bundler does
 // not emit. Pointing it at the bundled asset keeps the worker under the base path.
@@ -114,17 +124,22 @@ interface MapViewProps {
   setSelectedId: Dispatch<SetStateAction<number | null>>
   /** The line key of the selected line, or null. The other lines and stations are faded. */
   selectedKey: string | null
+  /** The line key under the pointer in the list, or null. Lit like a line hovered on the map. */
+  hoveredKey: string | null
+  /** Set when the pointer moves onto or off a line on the map. */
+  setHoveredLine: Dispatch<SetStateAction<string | null>>
   /** The routes with a point in the visible area, for the list of lines on screen. */
   setVisible: Dispatch<SetStateAction<RouteSource[]>>
   /** Set by the map to reload the visible area. The panel calls it from its own button. */
   reloadRef: { current: () => void }
 }
 
-export function MapView({ target, setKnown, setSelectedId, selectedKey, setVisible, reloadRef }: MapViewProps) {
+export function MapView({ target, setKnown, setSelectedId, selectedKey, hoveredKey, setHoveredLine, setVisible, reloadRef }: MapViewProps) {
   const container = useRef<HTMLDivElement>(null)
   const mapRef = useRef<maplibregl.Map | null>(null)
   // The selection and the restyling of the layers for it, which the map effect sets up once the map exists.
   const selectedKeyRef = useRef<string | null>(selectedKey)
+  const hoveredKeyRef = useRef<string | null>(hoveredKey)
   const applyHighlight = useRef<() => void>(() => {})
   const retry = useRef<() => void>(() => {})
   // Seconds until the OSM API is asked again after a rate limit, or null when no cooldown is running.
@@ -138,8 +153,9 @@ export function MapView({ target, setKnown, setSelectedId, selectedKey, setVisib
 
   useEffect(() => {
     selectedKeyRef.current = selectedKey
+    hoveredKeyRef.current = hoveredKey
     applyHighlight.current()
-  }, [selectedKey])
+  }, [selectedKey, hoveredKey])
 
   useEffect(() => {
     if (!container.current) return
@@ -275,16 +291,23 @@ export function MapView({ target, setKnown, setSelectedId, selectedKey, setVisib
     }
 
     // Hover is kept here and read by applyHighlight, which restyles the layers. Nothing is redrawn.
-    let hoveredLine: string | null = null
-    let hoveredStation: string | null = null
+    // The line last reported to the parent, and the station under the pointer with the lines serving it.
+    let reportedLine: string | null = null
+    let hoverName: string | null = null
+    let hoverStationLines: string[] = []
     applyHighlight.current = () => {
       // The layers exist once the style has loaded; until then there is nothing to restyle.
       if (!map.getLayer(LAYER_ID)) return
-      const selected = selectedKeyRef.current
-      const lineOpacity = opacityFor(selected, litLines(selected, hoveredLine))
-      const stationOpacity = opacityFor(selected, litStations(selected, hoveredStation))
-      const lineMatch = hoveredLine === null ? null : ['==', ['get', 'lineKey'], hoveredLine]
-      const stationMatch = hoveredStation === null ? null : ['==', ['get', 'name'], hoveredStation]
+      const highlight: Highlight = {
+        selectedKey: selectedKeyRef.current,
+        hoverLines: [...new Set([...(hoveredKeyRef.current ? [hoveredKeyRef.current] : []), ...hoverStationLines])],
+        hoverName,
+      }
+      const active = isActive(highlight)
+      const lineOpacity = opacityFor(active, litLines(highlight))
+      const stationOpacity = opacityFor(active, litStations(highlight))
+      const lineMatch = hoveredLineMatch(highlight)
+      const stationMatch = hoveredStationMatch(highlight)
       map.setPaintProperty(OVERVIEW_LAYER_ID, 'line-opacity', lineOpacity)
       map.setPaintProperty(OVERVIEW_LAYER_ID, 'line-width', emphasize(3, 3, lineMatch))
       map.setPaintProperty(CASING_LAYER_ID, 'line-opacity', lineOpacity)
@@ -439,25 +462,32 @@ export function MapView({ target, setKnown, setSelectedId, selectedKey, setVisib
         const layers = [...HOVER_LAYERS, PILL_LAYER_ID, STOP_LABEL_ID, BADGE_TEXT_ID, BADGE_MODE_ID].filter((id) => map.getLayer(id))
         if (map.queryRenderedFeatures(event.point, { layers }).length === 0) setSelectedId(null)
       })
-      // Hovering a line, badge or station highlights it and shows a pointer.
+      // Hovering a line, badge or station highlights it and shows a pointer. A line is also reported to
+      // the parent, which highlights its item in the list.
       map.on('mousemove', (event) => {
         const layers = HOVER_LAYERS.filter((id) => map.getLayer(id))
         const hit = layers.length > 0 ? map.queryRenderedFeatures(event.point, { layers })[0] : undefined
         const isStation = hit?.layer.id === STOP_LAYER_ID || hit?.layer.id === STOP_ALL_LAYER_ID
         const key = hit?.properties.lineKey
         const name = hit?.properties.name
+        const stationLines = hit?.properties.lines
         const nextLine = hit && !isStation && typeof key === 'string' ? key : null
-        const nextStation = hit && isStation && typeof name === 'string' && name !== '' ? name : null
+        const nextName = hit && isStation && typeof name === 'string' && name !== '' ? name : null
+        const nextStationLines = nextName !== null && Array.isArray(stationLines) ? stationLines.map(String) : []
         map.getCanvas().style.cursor = hit ? 'pointer' : ''
-        if (nextLine === hoveredLine && nextStation === hoveredStation) return
-        hoveredLine = nextLine
-        hoveredStation = nextStation
+        if (nextLine === reportedLine && nextName === hoverName) return
+        reportedLine = nextLine
+        hoverName = nextName
+        hoverStationLines = nextStationLines
+        setHoveredLine(nextLine)
         applyHighlight.current()
       })
       map.on('mouseout', () => {
-        if (hoveredLine === null && hoveredStation === null) return
-        hoveredLine = null
-        hoveredStation = null
+        if (reportedLine === null && hoverName === null) return
+        reportedLine = null
+        hoverName = null
+        hoverStationLines = []
+        setHoveredLine(null)
         applyHighlight.current()
       })
       applyHighlight.current()
@@ -521,7 +551,7 @@ export function MapView({ target, setKnown, setSelectedId, selectedKey, setVisib
       marker?.remove()
       map.remove()
     }
-  }, [setKnown, setSelectedId, setVisible, reloadRef])
+  }, [setKnown, setSelectedId, setHoveredLine, setVisible, reloadRef])
 
   // A place or line chosen in the search moves the map there. The map then loads the lines of the new view.
   useEffect(() => {
