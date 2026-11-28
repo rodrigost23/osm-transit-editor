@@ -7,6 +7,7 @@ import {
   badgesToGeoJSON,
   linesToGeoJSON,
   RouteChangeTracker,
+  sharedStationsToGeoJSON,
   stopsToGeoJSON,
   type PointCollection,
   type RouteCollection,
@@ -19,6 +20,7 @@ import { LayeredStore, MemoryStore } from '@/core/data/store'
 import { formatHash, parseHash } from '@/core/map/position'
 import { LOCATE_TIMEOUT_MS, LOCATE_ZOOM, locateErrorMessage } from '@/core/map/locate'
 import { baseStyleUrl } from './base-style'
+import { ensurePillImage } from './station-pill'
 
 // MapLibre 6 resolves its worker next to its own module, which a bundler does
 // not emit. Pointing it at the bundled asset keeps the worker under the base path.
@@ -46,6 +48,9 @@ const STOP_SOURCE_ID = 'transit-stops'
 const STOP_LAYER_ID = 'transit-stops-circle'
 const STOP_ALL_LAYER_ID = 'transit-stops-all-circle'
 const STOP_LABEL_ID = 'transit-stops-name'
+// Stations served by two lines are drawn as a pill over their dot, with the colour of each line.
+const PILL_SOURCE_ID = 'transit-shared-stations'
+const PILL_LAYER_ID = 'transit-shared-stations-pill'
 // Badges are too crowded to read below this zoom.
 const BADGE_MIN_ZOOM = 12
 // Stations are drawn, and named, from this zoom on.
@@ -136,6 +141,8 @@ export function MapView({ target, setKnown, setSelectedId, setVisible, reloadRef
     let controller: AbortController | undefined
     const drawn = new RouteChangeTracker()
     const seen = new Map<number, RouteSource>()
+    // The routes last drawn, so the stations can move with their lanes when the zoom changes.
+    let shownRoutes: RouteSource[] = []
     // The routes on screen, from the routes loaded so far.
     const publishVisible = () => {
       const bounds = map.getBounds()
@@ -154,13 +161,18 @@ export function MapView({ target, setKnown, setSelectedId, setVisible, reloadRef
       if (!source) return
       const badges = map.getSource<maplibregl.GeoJSONSource>(BADGE_SOURCE_ID)
       const stops = map.getSource<maplibregl.GeoJSONSource>(STOP_SOURCE_ID)
+      const pills = map.getSource<maplibregl.GeoJSONSource>(PILL_SOURCE_ID)
       const overview = map.getSource<maplibregl.GeoJSONSource>(OVERVIEW_SOURCE_ID)
       // Lines, badges and stations come from the same routes, so they are set together.
       const show = (routes: RouteSource[], next: RouteCollection) => {
         source.setData(next)
-        overview?.setData(linesToGeoJSON(routes))
+        overview?.setData(linesToGeoJSON(routes, map.getZoom()))
         badges?.setData(badgesToGeoJSON(routes))
-        stops?.setData(stopsToGeoJSON(routes))
+        shownRoutes = routes
+        stops?.setData(stopsToGeoJSON(routes, map.getZoom()))
+        const shared = sharedStationsToGeoJSON(routes, map.getZoom())
+        for (const station of shared.features) ensurePillImage(map, station.properties.colourA, station.properties.colourB)
+        pills?.setData(shared)
         publishVisible()
       }
       controller?.abort()
@@ -247,6 +259,14 @@ export function MapView({ target, setKnown, setSelectedId, setVisible, reloadRef
       window.history.replaceState(null, '', hash)
     }
 
+    // Stations move with their lanes below zoom 14, so they are placed again at each zoom.
+    map.on('zoomend', () => {
+      map.getSource<maplibregl.GeoJSONSource>(STOP_SOURCE_ID)?.setData(stopsToGeoJSON(shownRoutes, map.getZoom()))
+      if (shownRoutes.length > 0) map.getSource<maplibregl.GeoJSONSource>(OVERVIEW_SOURCE_ID)?.setData(linesToGeoJSON(shownRoutes, map.getZoom()))
+      const shared = sharedStationsToGeoJSON(shownRoutes, map.getZoom())
+      for (const station of shared.features) ensurePillImage(map, station.properties.colourA, station.properties.colourB)
+      map.getSource<maplibregl.GeoJSONSource>(PILL_SOURCE_ID)?.setData(shared)
+    })
     map.on('load', () => {
       map.addSource(SOURCE_ID, { type: 'geojson', data: emptyRoutes })
       map.addSource(OVERVIEW_SOURCE_ID, { type: 'geojson', data: emptyRoutes })
@@ -258,10 +278,11 @@ export function MapView({ target, setKnown, setSelectedId, setVisible, reloadRef
         maxzoom: config.minLineZoom,
         layout: { 'line-cap': 'round', 'line-join': 'round' },
         // Lines sharing a track are offset sideways, so they run side by side.
-        paint: { 'line-color': ['get', 'colour'], 'line-width': 3, 'line-offset': ['get', 'offset'] },
+        paint: { 'line-color': ['get', 'colour'], 'line-width': 3 },
       })
       map.addSource(BADGE_SOURCE_ID, { type: 'geojson', data: emptyPoints })
       map.addSource(STOP_SOURCE_ID, { type: 'geojson', data: emptyPoints })
+      map.addSource(PILL_SOURCE_ID, { type: 'geojson', data: emptyPoints })
       // A white casing under each route keeps it readable over the basemap.
       map.addLayer({
         id: CASING_LAYER_ID,
@@ -293,6 +314,21 @@ export function MapView({ target, setKnown, setSelectedId, setVisible, reloadRef
           'circle-color': '#ffffff',
           'circle-stroke-color': ['get', 'colour'],
           'circle-stroke-width': 2,
+        },
+      })
+      map.addLayer({
+        id: PILL_LAYER_ID,
+        type: 'symbol',
+        source: PILL_SOURCE_ID,
+        minzoom: config.lineVisibleZoom,
+        maxzoom: STOP_MIN_ZOOM,
+        layout: {
+          'icon-image': ['concat', 'station-pill-', ['get', 'colourA'], '-', ['get', 'colourB']],
+          // The shape lies across the track, at the angle of the track at the station.
+          'icon-rotate': ['get', 'angle'],
+          'icon-rotation-alignment': 'map',
+          'icon-allow-overlap': true,
+          'icon-ignore-placement': true,
         },
       })
       map.addLayer({
