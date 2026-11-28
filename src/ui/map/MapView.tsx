@@ -3,7 +3,7 @@ import * as maplibregl from 'maplibre-gl'
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { config } from '@/core/config'
-import { routesToGeoJSON, type RouteCollection, type RouteSource } from '@/core/data/geojson'
+import { RouteChangeTracker, type RouteCollection, type RouteSource } from '@/core/data/geojson'
 import { IndexedDbStore } from '@/core/data/idb-store'
 import { describeError, RouteLoader } from '@/core/data/route-loader'
 import { LayeredStore, MemoryStore } from '@/core/data/store'
@@ -40,6 +40,7 @@ export function MapView() {
 
     // Each new view cancels the request still in flight, so only the latest view can update the map.
     let controller: AbortController | undefined
+    const drawn = new RouteChangeTracker()
     const loader = new RouteLoader(config.osmApiUrl, {
       store: new LayeredStore(new MemoryStore(300), new IndexedDbStore()),
     })
@@ -49,6 +50,7 @@ export function MapView() {
       if (!source) return
       controller?.abort()
       if (map.getZoom() < config.minLineZoom) {
+        drawn.reset()
         source.setData(emptyRoutes)
         setZoomedOut(true)
         setLoading(false)
@@ -62,7 +64,11 @@ export function MapView() {
       setLoading(true)
       try {
         // Routes are drawn as parts of the view arrive, and again when all of it has.
-        const draw = (routes: RouteSource[]) => source.setData(routesToGeoJSON(routes))
+        // Only a change in the set of routes reaches the map, so the lines do not flicker on every response.
+        const draw = (routes: RouteSource[]) => {
+          const next = drawn.next(routes)
+          if (next) source.setData(next)
+        }
         const result = await loader.load(
           { south: bounds.getSouth(), west: bounds.getWest(), north: bounds.getNorth(), east: bounds.getEast() },
           current.signal,

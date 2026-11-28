@@ -28,6 +28,24 @@ export interface RouteCollection {
   features: RouteFeature[]
 }
 
+/** Remembers what was last drawn, so a set of routes that has not changed is not sent to the map again. */
+export class RouteChangeTracker {
+  private lastKey: string | undefined
+
+  /** The collection to draw, or null when it holds the same routes as the last one drawn. */
+  next(routes: readonly RouteSource[]): RouteCollection | null {
+    const sorted = [...routes].sort((a, b) => a.id - b.id)
+    const key = sorted.map((route) => route.id).join(',')
+    if (key === this.lastKey) return null
+    this.lastKey = key
+    return routesToGeoJSON(sorted)
+  }
+
+  reset(): void {
+    this.lastKey = undefined
+  }
+}
+
 /** One MultiLineString feature per route that has at least one line. */
 export function routesToGeoJSON(routes: readonly RouteSource[]): RouteCollection {
   return {

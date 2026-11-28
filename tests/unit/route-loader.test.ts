@@ -215,3 +215,32 @@ describe('RouteLoader', () => {
     expect(api.calls).toHaveLength(0)
   })
 })
+
+describe('track ways only', () => {
+  it('leaves out platforms, stops and areas, and keeps the track', () => {
+    const json = JSON.stringify({
+      elements: [
+        { type: 'node', id: 1, lat: 0, lon: 0 },
+        { type: 'node', id: 2, lat: 1, lon: 1 },
+        { type: 'way', id: 10, nodes: [1, 2], tags: {} },
+        { type: 'way', id: 11, nodes: [1, 2], tags: { railway: 'platform' } },
+        { type: 'way', id: 12, nodes: [1, 2], tags: { public_transport: 'platform' } },
+        { type: 'way', id: 13, nodes: [1, 2], tags: { area: 'yes' } },
+        {
+          type: 'relation',
+          id: 5,
+          members: [
+            { type: 'way', ref: 10, role: '' },
+            { type: 'way', ref: 10, role: 'forward' },
+            { type: 'way', ref: 11, role: '' },
+            { type: 'way', ref: 12, role: 'platform' },
+            { type: 'way', ref: 13, role: 'platform' },
+          ],
+          tags: { route: 'subway' },
+        },
+      ],
+    })
+    // Way 10 appears twice, once for each track role; the other ways are platforms or areas.
+    expect(relationRoute(parseOsmJson(json), 5).lines).toHaveLength(2)
+  })
+})

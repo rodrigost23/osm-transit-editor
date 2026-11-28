@@ -1,5 +1,5 @@
 import { type RouteSource } from './geojson'
-import { parseOsmJson, type OsmData } from './osm-json'
+import { parseOsmJson, type OsmData, type OsmWay } from './osm-json'
 import { type Entry, type Store, MemoryStore } from './store'
 import { splitBox, tileBox, tilesCovering, type BoundingBox, type Tile } from './tiles'
 
@@ -74,15 +74,24 @@ export function subwayRouteIds(data: OsmData): number[] {
     .map(([id]) => id)
 }
 
-/** Builds a route from a relation and its ways. Ways outside the requested area are included. */
+// Member roles that are the track itself. Platforms, stops and entrances have other roles.
+const TRACK_ROLES = new Set(['', 'forward', 'backward'])
+
+/** True for a way that is track. Platforms and areas drawn as ways are left out. */
+function isTrack(way: OsmWay): boolean {
+  const { railway, public_transport: publicTransport, highway, area } = way.tags
+  return railway !== 'platform' && publicTransport !== 'platform' && highway !== 'platform' && area !== 'yes'
+}
+
+/** Builds a route from a relation's track ways. Ways outside the requested area are included. */
 export function relationRoute(data: OsmData, id: number): RouteSource {
   const relation = data.relations.get(id)
   if (!relation) throw new Error(`Relation ${id} is missing from the response`)
   const lines: [number, number][][] = []
   for (const member of relation.members) {
-    if (member.type !== 'way') continue
+    if (member.type !== 'way' || !TRACK_ROLES.has(member.role)) continue
     const way = data.ways.get(member.ref)
-    if (!way) continue
+    if (!way || !isTrack(way)) continue
     const line: [number, number][] = []
     for (const ref of way.nodes) {
       const node = data.nodes.get(ref)

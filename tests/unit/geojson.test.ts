@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { resolveColour } from '@/core/data/colour'
-import { routesToGeoJSON, type RouteSource } from '@/core/data/geojson'
+import { RouteChangeTracker, routesToGeoJSON, type RouteSource } from '@/core/data/geojson'
 
 describe('resolveColour', () => {
   it('keeps valid hex colours', () => {
@@ -51,5 +51,23 @@ describe('routesToGeoJSON', () => {
     ])
     expect(collection.features).toHaveLength(1)
     expect(collection.features[0].properties).toMatchObject({ ref: '', name: '', operator: '', colour: '#8a8a8a', colourValid: false })
+  })
+})
+
+describe('RouteChangeTracker', () => {
+  const route = (id: number): RouteSource => ({ id, tags: {}, lines: [[[0, 0], [1, 1]]] })
+
+  it('draws routes in id order and skips a set it has already drawn', () => {
+    const tracker = new RouteChangeTracker()
+    expect(tracker.next([route(9), route(3)])?.features.map((feature) => feature.id)).toEqual([3, 9])
+    expect(tracker.next([route(3), route(9)])).toBeNull()
+  })
+
+  it('draws again when a route is added, and after a reset', () => {
+    const tracker = new RouteChangeTracker()
+    tracker.next([route(3)])
+    expect(tracker.next([route(3), route(4)])).not.toBeNull()
+    tracker.reset()
+    expect(tracker.next([route(3), route(4)])).not.toBeNull()
   })
 })
