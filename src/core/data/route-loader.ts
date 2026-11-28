@@ -4,9 +4,11 @@ import { type Entry, type Store, MemoryStore } from './store'
 import { splitBox, tileBox, tilesCovering, type BoundingBox, type Tile } from './tiles'
 
 // OpenStreetMap asks API clients to keep to two simultaneous requests.
-const CONCURRENCY = 2
+// One request to the OSM API at a time. Queued requests start in the order they were asked for.
+const CONCURRENCY = 1
 // Only the tiles nearest the map centre are loaded, so panning is not met with a flood of requests.
-const NEAREST_TILES = 6
+// The tiles nearest the centre are loaded at once: the centre tile and its two nearest neighbours.
+const NEAREST_TILES = 3
 // Zoomed out, the cache is read for up to this many tiles nearest the centre. Reads are local, but a wide view has many tiles.
 const CACHED_TILES = 64
 const REQUEST_TIMEOUT_MS = 30_000
@@ -14,15 +16,24 @@ const REQUEST_TIMEOUT_MS = 30_000
 const RETRY_WINDOW_MS = 60_000
 const FIRST_RETRY_MS = 1_000
 const MAX_RETRY_DELAY_MS = 16_000
-// After a rate limit or a server overload, requests wait this long, or Retry-After when given.
-const COOLDOWN_MS = 30_000
+// After a rate limit or a server overload, requests wait at least this long, or Retry-After when longer.
+// Each rate limit that comes soon after the last one doubles the wait, up to the maximum.
+const MIN_COOLDOWN_MS = 60_000
+const MAX_COOLDOWN_MS = 15 * 60_000
+const STREAK_WINDOW_MS = 10 * 60_000
+// The cooldown is kept in local storage, so reloading the page does not send requests during it.
+const COOLDOWN_KEY = 'osm-api-cooldown'
+// A saved route is refreshed in the background this long after it is shown, so a burst of views does not refresh everything at once.
+const REFRESH_DELAY_MS = 5_000
 const COOLING_STATUS = new Set([429, 503, 509])
 // A box the API refuses as too large is split into quarters, up to this many levels deeper.
 const MAX_SPLIT_DEPTH = 4
-// Saved data younger than this is used as is. Older data is shown at once and refreshed in the background.
-const FRESH_MS = 24 * 60 * 60 * 1000
-// Part of every cache key. Change it when the saved shape changes.
-const FORMAT_VERSION = 'v3'
+// Saved data is always shown when it is there. Only data older than this is refreshed, once, when its area is opened.
+const STALE_MS = 7 * 24 * 60 * 60 * 1000
+// Part of every cache key. Keep it stable: a change drops everything saved. Saved routes without stations are refreshed once instead.
+const FORMAT_VERSION = 'v1'
+// Cooldowns are waited out, and retried this many times at most. They do not count against the retry window.
+const MAX_COOLING_RETRIES = 2
 
 export class OsmHttpError extends Error {
   readonly status: number
@@ -51,11 +62,31 @@ export interface LoadResult {
 type Fetch = (url: string, init?: RequestInit) => Promise<Response>
 type Sleep = (ms: number, signal: AbortSignal) => Promise<void>
 
+/** The part of local storage the cooldown uses. */
+export type CooldownStorage = Pick<Storage, 'getItem' | 'setItem'>
+
 export interface LoaderOptions {
   fetchFn?: Fetch
   store?: Store
   now?: () => number
   sleep?: Sleep
+  storage?: CooldownStorage
+  /** Called when a cooldown starts, with the time (ms since epoch) it ends. */
+  onCooldown?: (until: number) => void
+}
+
+interface Cooldown {
+  until: number
+  streak: number
+}
+
+/** Local storage when the browser gives it, otherwise none: the cooldown then lasts for this page only. */
+function defaultStorage(): CooldownStorage | undefined {
+  try {
+    return globalThis.localStorage
+  } catch {
+    return undefined
+  }
 }
 
 /** Text that says why a request failed, for the console and the notice on the map. */
@@ -138,6 +169,16 @@ const defaultSleep: Sleep = (ms, signal) =>
     signal.addEventListener('abort', onAbort, { once: true })
   })
 
+export interface LoadOptions {
+  /** Ask the API again for the box and its routes, even when they are saved. */
+  refresh?: boolean
+}
+
+/** A saved route from before stations were kept has no stops. It is refreshed once, so its stations appear. */
+function outdatedRoute(value: unknown): boolean {
+  return !('stops' in (value as object))
+}
+
 /**
  * Loads subway routes for the visible area. Each tile is split into quarters, and the
  * quarters nearest the centre are asked for first. The map is redrawn as each quarter
@@ -152,8 +193,11 @@ export class RouteLoader {
   private readonly store: Store
   private readonly now: () => number
   private readonly sleep: Sleep
+  private readonly storage: CooldownStorage | undefined
+  private readonly onCooldown: ((until: number) => void) | undefined
   private active = 0
   private readonly waiting: (() => void)[] = []
+  private readonly refreshing = new Set<string>()
   private pausedUntil = 0
 
   constructor(apiUrl: string, options: LoaderOptions = {}) {
@@ -163,10 +207,23 @@ export class RouteLoader {
     this.store = options.store ?? new MemoryStore(300)
     this.now = options.now ?? Date.now
     this.sleep = options.sleep ?? defaultSleep
+    this.storage = options.storage ?? defaultStorage()
+    this.onCooldown = options.onCooldown
+    this.pausedUntil = this.readCooldown()?.until ?? 0
+  }
+
+  /** Milliseconds until requests are sent again after a rate limit or overload. Zero when none is in force. */
+  cooldownLeft(): number {
+    return Math.max(0, this.pausedUntil - this.now())
   }
 
   /** Loads the routes crossing the box. onUpdate is called each time more of them are ready. */
-  async load(box: BoundingBox, signal: AbortSignal, onUpdate?: (result: LoadResult) => void): Promise<LoadResult> {
+  async load(
+    box: BoundingBox,
+    signal: AbortSignal,
+    onUpdate?: (result: LoadResult) => void,
+    options: LoadOptions = {},
+  ): Promise<LoadResult> {
     const centre = centreOf(box)
     const tiles = tilesCovering(box)
       .sort((a, b) => distance(centreOf(tileBox(a)), centre) - distance(centreOf(tileBox(b)), centre))
@@ -188,7 +245,10 @@ export class RouteLoader {
     const routeFor = (id: number): Promise<RouteSource> => {
       let promise = pending.get(id)
       if (!promise) {
-        promise = this.remember(`route/${FORMAT_VERSION}/${id}`, signal, (s) => this.fetchRoute(id, s))
+        promise = this.remember(`route/${FORMAT_VERSION}/${id}`, signal, (s) => this.fetchRoute(id, s), {
+          force: options.refresh,
+          outdated: outdatedRoute,
+        })
         pending.set(id, promise)
       }
       return promise
@@ -198,7 +258,7 @@ export class RouteLoader {
       quarters.map(async (quarter) => {
         let ids: number[]
         try {
-          ids = await this.remember(quarter.key, signal, (s) => this.fetchQuarter(quarter.box, s, 0))
+          ids = await this.remember(quarter.key, signal, (s) => this.fetchQuarter(quarter.box, s, 0), { force: options.refresh })
         } catch (error) {
           if (!signal.aborted) report({ kind: 'map', url: mapUrl(this.apiUrl, quarter.box), reason: describeError(error) })
           return
@@ -244,11 +304,16 @@ export class RouteLoader {
   }
 
   /** Answers from the store when it can, and saves what it fetched when it succeeds. */
-  private async remember<T>(key: string, signal: AbortSignal, load: (signal: AbortSignal) => Promise<T>): Promise<T> {
-    const saved = await this.store.get(key)
-    if (saved && this.now() - saved.savedAt < FRESH_MS) return saved.value as T
+  private async remember<T>(
+    key: string,
+    signal: AbortSignal,
+    load: (signal: AbortSignal) => Promise<T>,
+    options: { force?: boolean; outdated?: (value: unknown) => boolean } = {},
+  ): Promise<T> {
+    const saved = options.force ? undefined : await this.store.get(key)
     if (saved) {
-      void this.refresh(key, load)
+      // Shown as it is. The background refresh only runs for old data, never for data that is merely cached.
+      if (this.now() - saved.savedAt >= STALE_MS || options.outdated?.(saved.value)) void this.refresh(key, load)
       return saved.value as T
     }
     const value = await load(signal)
@@ -257,10 +322,16 @@ export class RouteLoader {
   }
 
   private async refresh<T>(key: string, load: (signal: AbortSignal) => Promise<T>): Promise<void> {
+    // One refresh per key at a time: the older copy is still stale after a view, so later views would ask again.
+    if (this.refreshing.has(key)) return
+    this.refreshing.add(key)
     try {
+      await this.sleep(REFRESH_DELAY_MS, new AbortController().signal)
       this.save(key, await load(new AbortController().signal))
     } catch {
       // The older copy stays in the store until a later load succeeds.
+    } finally {
+      this.refreshing.delete(key)
     }
   }
 
@@ -294,12 +365,18 @@ export class RouteLoader {
   private async request(url: string, signal: AbortSignal): Promise<string> {
     const started = this.now()
     let delay = FIRST_RETRY_MS
+    let coolings = 0
     for (;;) {
       try {
         return await this.limited(signal, () => this.once(url, signal))
       } catch (error) {
-        const retryable = error instanceof TransportError || (error instanceof OsmHttpError && COOLING_STATUS.has(error.status))
-        if (!retryable || signal.aborted || this.now() - started + delay > RETRY_WINDOW_MS) throw error
+        if (signal.aborted) throw error
+        if (error instanceof OsmHttpError && COOLING_STATUS.has(error.status)) {
+          // The cooldown already says how long to wait, so the next attempt just queues behind it.
+          if (++coolings > MAX_COOLING_RETRIES) throw error
+          continue
+        }
+        if (!(error instanceof TransportError) || this.now() - started + delay > RETRY_WINDOW_MS) throw error
         await this.sleep(delay, signal)
         delay = Math.min(delay * 2, MAX_RETRY_DELAY_MS)
       }
@@ -319,7 +396,7 @@ export class RouteLoader {
     try {
       const response = await this.fetchFn(url, { signal: controller.signal })
       if (!response.ok) {
-        if (COOLING_STATUS.has(response.status)) this.cool(retryAfterMs(response) || COOLDOWN_MS)
+        if (COOLING_STATUS.has(response.status)) this.cool(retryAfterMs(response))
         throw new OsmHttpError(response.status)
       }
       return await response.text()
@@ -347,8 +424,37 @@ export class RouteLoader {
     }
   }
 
-  private cool(ms: number): void {
-    this.pausedUntil = Math.max(this.pausedUntil, this.now() + ms)
+  /** Starts a cooldown after a rate limit or overload. Requests made meanwhile wait for it, and it survives a reload. */
+  private cool(retryAfter: number): void {
+    const now = this.now()
+    const previous = this.readCooldown()
+    // Requests that fail together start one cooldown, not one each. Only a new rate limit after the last one escalates it.
+    if (previous && now < previous.until) return
+    const streak = previous && now - previous.until < STREAK_WINDOW_MS ? previous.streak + 1 : 1
+    const ms = Math.min(Math.max(retryAfter, MIN_COOLDOWN_MS) * 2 ** (streak - 1), MAX_COOLDOWN_MS)
+    const until = now + ms
+    this.pausedUntil = Math.max(this.pausedUntil, until)
+    this.writeCooldown({ until, streak })
+    this.onCooldown?.(until)
+  }
+
+  private readCooldown(): Cooldown | undefined {
+    try {
+      const raw = this.storage?.getItem(COOLDOWN_KEY)
+      if (!raw) return undefined
+      const value = JSON.parse(raw) as Partial<Cooldown>
+      return Number.isFinite(value.until) && Number.isFinite(value.streak) ? (value as Cooldown) : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  private writeCooldown(cooldown: Cooldown): void {
+    try {
+      this.storage?.setItem(COOLDOWN_KEY, JSON.stringify(cooldown))
+    } catch {
+      // Storage is full or blocked: the cooldown still applies to this page.
+    }
   }
 
   /** Runs a request once a slot is free and any cooldown is over. A slot passes straight to the next waiting request. */

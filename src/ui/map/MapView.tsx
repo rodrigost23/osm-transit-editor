@@ -62,6 +62,9 @@ export function MapView({ target, known, setKnown, selectedId, setSelectedId }: 
   const container = useRef<HTMLDivElement>(null)
   const mapRef = useRef<maplibregl.Map | null>(null)
   const retry = useRef<() => void>(() => {})
+  const reload = useRef<() => void>(() => {})
+  // Seconds until the OSM API is asked again after a rate limit, or null when no cooldown is running.
+  const [waitSeconds, setWaitSeconds] = useState<number | null>(null)
   const [zoomedOut, setZoomedOut] = useState(false)
   const [loading, setLoading] = useState(false)
   // What went wrong with the last load, or null when everything in view loaded.
@@ -84,9 +87,10 @@ export function MapView({ target, known, setKnown, selectedId, setSelectedId }: 
     const seen = new Map<number, RouteSource>()
     const loader = new RouteLoader(config.osmApiUrl, {
       store: new LayeredStore(new MemoryStore(300), new IndexedDbStore()),
+      onCooldown: (until) => setWaitSeconds(Math.ceil((until - Date.now()) / 1000)),
     })
     let debounce: ReturnType<typeof setTimeout> | undefined
-    const loadLines = async () => {
+    const loadLines = async (refresh = false) => {
       const source = map.getSource<maplibregl.GeoJSONSource>(SOURCE_ID)
       if (!source) return
       const badges = map.getSource<maplibregl.GeoJSONSource>(BADGE_SOURCE_ID)
@@ -126,6 +130,8 @@ export function MapView({ target, known, setKnown, selectedId, setSelectedId }: 
         return
       }
       setZoomedOut(false)
+      const left = loader.cooldownLeft()
+      setWaitSeconds(left > 0 ? Math.ceil(left / 1000) : null)
       const current = new AbortController()
       controller = current
       const bounds = map.getBounds()
@@ -143,6 +149,7 @@ export function MapView({ target, known, setKnown, selectedId, setSelectedId }: 
           { south: bounds.getSouth(), west: bounds.getWest(), north: bounds.getNorth(), east: bounds.getEast() },
           current.signal,
           (partial) => draw(partial.routes),
+          { refresh },
         )
         // Routes that did load stay drawn even when some requests failed.
         draw(result.routes)
@@ -156,6 +163,7 @@ export function MapView({ target, known, setKnown, selectedId, setSelectedId }: 
           setLoadError(null)
         }
         setLoading(false)
+        setWaitSeconds(null)
       } catch (error) {
         if (current.signal.aborted) return
         console.error('Could not load subway routes:', error)
@@ -164,6 +172,7 @@ export function MapView({ target, known, setKnown, selectedId, setSelectedId }: 
       }
     }
     retry.current = () => void loadLines()
+    reload.current = () => void loadLines(true)
 
     // Keep the position in the hash so a reload or a shared link opens the same place.
     // replaceState does not fire hashchange, so this does not loop.
@@ -263,6 +272,16 @@ export function MapView({ target, known, setKnown, selectedId, setSelectedId }: 
       <div ref={container} className="map" style={{ position: 'absolute', inset: 0 }} />
       {zoomedOut && <p className="zoom-hint">Zoom in to see lines.</p>}
       {loading && !zoomedOut && !loadError && <p className="zoom-hint">Loading lines…</p>}
+      {waitSeconds !== null && (
+        <p className="zoom-hint" role="status">
+          Rate limited by OpenStreetMap, retrying in {waitSeconds} s.
+        </p>
+      )}
+      {!zoomedOut && (
+        <button type="button" className="map-reload" onClick={() => reload.current()}>
+          Reload visible area
+        </button>
+      )}
       {selected && (
         <LineCard line={selected} variants={lineVariants(known, selected.id)} onClose={() => setSelectedId(null)} />
       )}

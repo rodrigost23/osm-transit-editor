@@ -149,7 +149,7 @@ describe('RouteLoader', () => {
   it('loads only the tiles nearest the middle of a wide view', async () => {
     const api = fakeApi()
     await loaderFor(api).load({ south: -22.95, north: -22.85, west: -43.25, east: -43.1 }, signal())
-    expect(api.count('/map.json?bbox=')).toBe(24)
+    expect(api.count('/map.json?bbox=')).toBe(12)
   })
 
   it('reports a failed route and still returns the others', async () => {
@@ -185,16 +185,38 @@ describe('RouteLoader', () => {
     expect(api.count('/relation/7/full.json')).toBe(before + 1)
   })
 
-  it('shows a saved result that is past its freshness at once, and refreshes it in the background', async () => {
+  it('shows a saved result without any request, however old it is within the stale window', async () => {
     const api = fakeApi()
     const clock = fakeClock()
     const loader = loaderFor(api, clock)
     await loader.load(oneTile, signal())
-    clock.sleep(25 * 60 * 60 * 1000)
+    clock.sleep(6 * 24 * 60 * 60 * 1000)
+    const before = api.calls.length
+    const result = await loader.load(oneTile, signal())
+    expect(result.routes.map((route) => route.id)).toEqual([7])
+    expect(api.calls.length).toBe(before)
+  })
+
+  it('shows a saved result past the stale window at once, and refreshes it in the background', async () => {
+    const api = fakeApi()
+    const clock = fakeClock()
+    const loader = loaderFor(api, clock)
+    await loader.load(oneTile, signal())
+    clock.sleep(8 * 24 * 60 * 60 * 1000)
     const before = api.calls.length
     const result = await loader.load(oneTile, signal())
     expect(result.routes.map((route) => route.id)).toEqual([7])
     await vi.waitFor(() => expect(api.calls.length).toBeGreaterThan(before))
+  })
+
+  it('asks the API again, ignoring saved results, when a refresh is requested', async () => {
+    const api = fakeApi()
+    const clock = fakeClock()
+    const loader = loaderFor(api, clock)
+    await loader.load(oneTile, signal())
+    const before = api.calls.length
+    await loader.load(oneTile, signal(), undefined, { refresh: true })
+    expect(api.calls.length).toBeGreaterThan(before)
   })
 
   it('still loads from the network when the disk cache never answers', async () => {
