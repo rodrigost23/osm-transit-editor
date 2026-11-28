@@ -145,46 +145,119 @@ export function badgesToGeoJSON(routes: readonly RouteSource[]): PointCollection
   }
 }
 
-/**
- * One MultiLineString per line, for the zoomed-out view. A way shared by the two directions
- * of a line is drawn once.
- */
-export function linesToGeoJSON(routes: readonly RouteSource[]): RouteCollection {
-  return {
-    type: 'FeatureCollection',
-    features: groupLines(routes).flatMap((group) => {
-      const seen = new Set<number>()
-      const coordinates: [number, number][][] = []
-      for (const route of group) {
-        route.lines.forEach((line, index) => {
-          const way = route.ways?.[index]
-          if (way !== undefined) {
-            if (seen.has(way)) return
-            seen.add(way)
-          }
-          coordinates.push(line)
-        })
-      }
-      if (coordinates.length === 0) return []
-      const first = group[0]
-      const { colour, valid } = resolveColour(first.tags.colour)
-      return [
-        {
-          type: 'Feature' as const,
-          id: first.id,
-          geometry: { type: 'MultiLineString' as const, coordinates },
-          properties: {
-            relationId: first.id,
-            ref: first.tags.ref ?? '',
-            name: first.tags.name ?? '',
-            operator: first.tags.operator ?? '',
-            colour,
-            colourValid: valid,
-          },
-        },
-      ]
-    }),
+/** Distance between two parallel tracks in the zoomed-out view, in pixels. Lines are 3 px wide. */
+export const PARALLEL_SPACING = 4
+
+export interface OverviewFeature {
+  type: 'Feature'
+  geometry: { type: 'LineString'; coordinates: [number, number][] }
+  properties: RouteProperties & {
+    /** Pixels to move the segment sideways, so lines sharing a track sit side by side. */
+    offset: number
   }
+}
+
+export interface OverviewCollection {
+  type: 'FeatureCollection'
+  features: OverviewFeature[]
+}
+
+/** Length in degrees, with longitude scaled by the cosine of the latitude. Only compared, never shown. */
+function lineLength(line: readonly [number, number][]): number {
+  let total = 0
+  for (let i = 1; i < line.length; i++) {
+    const [x0, y0] = line[i - 1]
+    const [x1, y1] = line[i]
+    const cos = Math.cos(((y0 + y1) / 2) * (Math.PI / 180))
+    total += Math.hypot((x1 - x0) * cos, y1 - y0)
+  }
+  return total
+}
+
+/**
+ * The one route that draws a line in the zoomed-out view: the longest of its routes, the lowest id on a tie.
+ * Its branches and the other direction's variants are left out, so each line is drawn once.
+ */
+export function mainRoute(group: readonly RouteSource[]): RouteSource | undefined {
+  let best: RouteSource | undefined
+  let bestLength = -1
+  for (const route of group) {
+    const length = route.lines.reduce((sum, line) => sum + lineLength(line), 0)
+    if (length > bestLength) {
+      best = route
+      bestLength = length
+    }
+  }
+  return best
+}
+
+/** True when a segment runs against the reference segment, so it must be drawn reversed to match. */
+function isReversed(line: readonly [number, number][], reference: readonly [number, number][]): boolean {
+  const d = (a: [number, number], b: [number, number]) => (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
+  const first = line[0]
+  const last = line[line.length - 1]
+  const refFirst = reference[0]
+  const refLast = reference[reference.length - 1]
+  return d(first, refFirst) + d(last, refLast) > d(first, refLast) + d(last, refFirst)
+}
+
+/**
+ * One LineString per way of each line's main route, for the zoomed-out view. A way shared by several
+ * lines is drawn once per line, each offset sideways from the track so the lines run side by side.
+ * The offset is 0 for a way that only one line uses, and for routes saved without way ids.
+ */
+export function linesToGeoJSON(routes: readonly RouteSource[]): OverviewCollection {
+  const mains: { route: RouteSource; group: RouteSource[] }[] = []
+  for (const group of groupLines(routes)) {
+    const route = mainRoute(group)
+    if (route && route.lines.length > 0) mains.push({ route, group })
+  }
+
+  // The lines using each way, in the order of the groups, and the orientation of the first use.
+  const users = new Map<number, number[]>()
+  const reference = new Map<number, [number, number][]>()
+  mains.forEach(({ route }, index) => {
+    route.lines.forEach((line, at) => {
+      const way = route.ways?.[at]
+      if (way === undefined || line.length < 2) return
+      const list = users.get(way) ?? []
+      if (!list.includes(index)) list.push(index)
+      users.set(way, list)
+      if (!reference.has(way)) reference.set(way, line)
+    })
+  })
+
+  const features: OverviewFeature[] = []
+  mains.forEach(({ route, group }, index) => {
+    const first = group[0]
+    const { colour, valid } = resolveColour(first.tags.colour)
+    route.lines.forEach((line, at) => {
+      if (line.length < 2) return
+      const way = route.ways?.[at]
+      let offset = 0
+      let coordinates = line
+      if (way !== undefined) {
+        const sharing = users.get(way) ?? [index]
+        offset = (sharing.indexOf(index) - (sharing.length - 1) / 2) * PARALLEL_SPACING
+        const ref = reference.get(way)
+        if (ref && isReversed(line, ref)) coordinates = [...line].reverse()
+      }
+      features.push({
+        type: 'Feature',
+        geometry: { type: 'LineString', coordinates },
+        properties: {
+          relationId: first.id,
+          ref: first.tags.ref ?? '',
+          name: first.tags.name ?? '',
+          operator: first.tags.operator ?? '',
+          colour,
+          colourValid: valid,
+          offset,
+        },
+      })
+    })
+  })
+  return { type: 'FeatureCollection', features }
 }
 
 /** One MultiLineString feature per route that has at least one line. */

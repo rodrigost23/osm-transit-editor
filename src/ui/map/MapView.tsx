@@ -256,7 +256,8 @@ export function MapView({ target, setKnown, setSelectedId, setVisible, reloadRef
         minzoom: config.lineVisibleZoom,
         maxzoom: config.minLineZoom,
         layout: { 'line-cap': 'round', 'line-join': 'round' },
-        paint: { 'line-color': ['get', 'colour'], 'line-width': 3 },
+        // Lines sharing a track are offset sideways, so they run side by side.
+        paint: { 'line-color': ['get', 'colour'], 'line-width': 3, 'line-offset': ['get', 'offset'] },
       })
       map.addSource(BADGE_SOURCE_ID, { type: 'geojson', data: emptyPoints })
       map.addSource(STOP_SOURCE_ID, { type: 'geojson', data: emptyPoints })

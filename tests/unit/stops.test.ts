@@ -101,34 +101,51 @@ describe('contrastText', () => {
 })
 
 describe('linesToGeoJSON', () => {
-  it('draws one feature per line, and a way shared by both directions only once', () => {
-    const forward: RouteSource = {
-      id: 5,
-      tags: { ref: '1', network: 'Metrô', operator: 'Metrô Rio', colour: '#f58220' },
-      lines: [[[0, 0], [1, 1]], [[1, 1], [2, 2]]],
-      ways: [100, 101],
-    }
-    const backward: RouteSource = {
-      id: 6,
-      tags: { ref: '1', network: 'Metrô', operator: 'Metrô Rio', colour: '#f58220' },
-      lines: [[[1, 1], [2, 2]], [[2, 2], [3, 3]]],
-      ways: [101, 102],
-    }
+  const tags = { ref: '1', network: 'Metrô', operator: 'Metrô Rio', colour: '#f58220' }
+
+  it('draws one line per line name, from its longest route, without the branches of the others', () => {
+    const forward: RouteSource = { id: 5, tags, lines: [[[0, 0], [1, 1]], [[1, 1], [2, 2]]], ways: [100, 101] }
+    // The other direction stops short and takes a side branch: only the longer route is drawn.
+    const backward: RouteSource = { id: 6, tags, lines: [[[2, 2], [1, 1]], [[1, 1], [1.2, 0.2]]], ways: [101, 300] }
     const other: RouteSource = { id: 9, tags: { ref: '2' }, lines: [[[5, 5], [6, 6]]], ways: [200] }
     const collection = linesToGeoJSON([backward, forward, other])
-    expect(collection.features).toHaveLength(2)
-    expect(collection.features[0].id).toBe(5)
-    expect(collection.features[0].geometry.coordinates).toEqual([
+    expect(collection.features.map((feature) => feature.geometry.coordinates)).toEqual([
       [[0, 0], [1, 1]],
       [[1, 1], [2, 2]],
-      [[2, 2], [3, 3]],
+      [[5, 5], [6, 6]],
     ])
     expect(collection.features[0].properties.colour).toBe('#f58220')
   })
 
-  it('draws every line of routes saved without way ids', () => {
-    const route: RouteSource = { id: 1, tags: {}, lines: [[[0, 0], [1, 1]]] }
-    expect(linesToGeoJSON([route, { ...route, id: 2 }]).features[0].geometry.coordinates).toHaveLength(2)
+  it('puts lines that share a track side by side, centred on it', () => {
+    const red: RouteSource = { id: 1, tags: { ref: 'R' }, lines: [[[0, 0], [1, 0]]], ways: [100] }
+    const green: RouteSource = { id: 2, tags: { ref: 'G' }, lines: [[[0, 0], [1, 0]]], ways: [100] }
+    const alone: RouteSource = { id: 3, tags: { ref: 'A' }, lines: [[[0, 1], [1, 1]]], ways: [200] }
+    const offsets = linesToGeoJSON([green, red, alone]).features.map((feature) => feature.properties.offset)
+    expect(offsets).toEqual([-2, 2, 0])
+  })
+
+  it('spreads three lines on one track evenly', () => {
+    const routes = [1, 2, 3].map((id): RouteSource => ({ id, tags: { ref: String(id) }, lines: [[[0, 0], [1, 0]]], ways: [100] }))
+    expect(linesToGeoJSON(routes).features.map((feature) => feature.properties.offset)).toEqual([-4, 0, 4])
+  })
+
+  it('draws a shared track in one direction for every line, whichever way each route runs', () => {
+    const north: RouteSource = { id: 1, tags: { ref: 'N' }, lines: [[[0, 0], [1, 0]]], ways: [100] }
+    const south: RouteSource = { id: 2, tags: { ref: 'S' }, lines: [[[1, 0], [0, 0]]], ways: [100] }
+    const coordinates = linesToGeoJSON([north, south]).features.map((feature) => feature.geometry.coordinates)
+    expect(coordinates).toEqual([
+      [[0, 0], [1, 0]],
+      [[0, 0], [1, 0]],
+    ])
+  })
+
+  it('draws every line of routes saved without way ids, without offsets', () => {
+    const first: RouteSource = { id: 1, tags: {}, lines: [[[0, 0], [1, 1]], [[1, 1], [2, 2]]] }
+    const second: RouteSource = { id: 2, tags: { ref: 'x' }, lines: [[[5, 5], [6, 6]]] }
+    const collection = linesToGeoJSON([first, second])
+    expect(collection.features).toHaveLength(3)
+    expect(collection.features.every((feature) => feature.properties.offset === 0)).toBe(true)
   })
 })
 
