@@ -136,7 +136,8 @@ export class RouteLoader {
 
   constructor(apiUrl: string, options: LoaderOptions = {}) {
     this.apiUrl = apiUrl
-    this.fetchFn = options.fetchFn ?? fetch
+    // Wrapped: a bare fetch stored on this object and called as a method throws "Illegal invocation" in browsers.
+    this.fetchFn = options.fetchFn ?? ((url, init) => fetch(url, init))
     this.store = options.store ?? new MemoryStore(300)
     this.now = options.now ?? Date.now
     this.sleep = options.sleep ?? defaultSleep
