@@ -1,16 +1,16 @@
 import { useRef, useState, type FormEvent } from 'react'
 import { config } from '@/core/config'
 import { modeLabel, type RouteSource, type Stop } from '@/core/data/geojson'
-import { groupLines, lineColour, lineName, lineVariants, routeCentre } from '@/core/data/lines'
+import { groupLines, lineColour, lineVariants, routeCentre } from '@/core/data/lines'
 import { searchPlace } from '@/core/data/nominatim'
 import { describeError } from '@/core/data/route-loader'
 import { MapView, type MapTarget } from '@/ui/map/MapView'
 import { LinePanel } from '@/ui/map/LinePanel'
+import { displayLineName } from '@/ui/format'
 import { StationPanel } from '@/ui/map/StationPanel'
 import { Badge } from '@/ui/components/ui/badge'
 import { Button } from '@/ui/components/ui/button'
 import { Card } from '@/ui/components/ui/card'
-import { cn } from '@/lib/utils'
 
 // A floating panel over the full-screen map. Place search goes to Nominatim on submit.
 // The list shows the lines on screen, from the routes already loaded, so it needs no request.
@@ -109,13 +109,13 @@ export function StartScreen() {
         </form>
         <div className="mt-4 grid gap-2">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-medium tracking-wide text-muted-foreground uppercase">Lines on screen</span>
-            <Button variant="ghost" size="sm" className="-my-1 -mr-2 h-7 px-2 text-xs" onClick={() => reloadRef.current()}>
+            <span className="text-[11px] font-semibold tracking-wider text-muted-foreground uppercase">Lines on screen</span>
+            <Button variant="ghost" size="sm" className="-my-1 -mr-2 h-7 px-2 text-xs text-muted-foreground" onClick={() => reloadRef.current()}>
               ↻ Reload
             </Button>
           </div>
           {lines.length === 0 && (
-            <p className="text-sm text-muted-foreground">No lines on screen. Zoom in or pan to load some.</p>
+            <p className="text-[13px] text-muted-foreground">No lines on screen. Zoom in or pan to load some.</p>
           )}
           {lines.length > 0 && (
             <ul className="grid max-h-[40vh] gap-1.5 overflow-y-auto">
@@ -132,8 +132,10 @@ export function StartScreen() {
                     >
                       {group[0].tags.ref || '?'}
                     </span>
-                    <span className="flex-1 leading-snug">{lineName(group[0])}</span>
-                    <span className="text-xs text-muted-foreground">{modeLabel(group[0])}</span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[13px] font-semibold">{displayLineName(group[0])}</span>
+                      <span className="block truncate text-xs text-muted-foreground">{modeLabel(group[0])}</span>
+                    </span>
                   </button>
                 </li>
               ))}
@@ -141,11 +143,11 @@ export function StartScreen() {
           )}
         </div>
         {status && (
-          <p role="status" className={cn('mt-3 text-xs text-muted-foreground')}>
+          <p role="status" className="mt-3 text-xs text-muted-foreground">
             {status}
           </p>
         )}
-        <p className="mt-3 text-xs text-muted-foreground">
+        <p className="mt-3 text-[11px] text-muted-foreground">
           Place search by Nominatim. Map data © OpenStreetMap contributors.
         </p>
       </Card>

@@ -1,6 +1,7 @@
 import type { Stop } from '@/core/data/geojson'
 import { Badge } from '@/ui/components/ui/badge'
 import { Card } from '@/ui/components/ui/card'
+import { displayStopName } from '@/ui/format'
 
 interface StationPanelProps {
   stop: Stop
@@ -17,7 +18,7 @@ export function StationPanel({ stop, position, total, onClose }: StationPanelPro
     <Card aria-label={stop.name} className="absolute top-16 right-4 z-10 w-[min(300px,calc(100%-32px))] gap-0 rounded-2xl p-4 shadow-xl">
       <div className="flex items-start gap-2">
         <div className="min-w-0 flex-1">
-          <h2 className="text-base font-semibold leading-snug">{stop.name}</h2>
+          <h2 className="text-base font-semibold leading-snug">{displayStopName(stop.name)}</h2>
           <p className="mt-0.5 text-xs text-muted-foreground">
             Station {position} of {total}
           </p>
@@ -32,7 +33,7 @@ export function StationPanel({ stop, position, total, onClose }: StationPanelPro
         </button>
       </div>
       <div className="mt-4 grid gap-2">
-        <span className="text-xs font-medium tracking-wide text-muted-foreground uppercase">In this route</span>
+        <span className="text-[11px] font-semibold tracking-wider text-muted-foreground uppercase">In this route</span>
         <div className="flex items-center justify-between rounded-lg border border-border bg-background px-3 py-2 text-sm">
           <span>Stop</span>
           <Badge variant="outline" className="font-normal tabular-nums">
