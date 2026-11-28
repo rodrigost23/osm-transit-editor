@@ -113,4 +113,28 @@ describe('mirror fallback', () => {
     // One query for the box, then one per route.
     expect(net.calls.filter((url) => url.startsWith(MIRROR_A)).length).toBe(2)
   })
+
+  it('answers a second view of the same quarters from the store, without the box query', async () => {
+    const net = network({})
+    const store = new MemoryStore(500)
+    let time = 0
+    const make = () =>
+      new RouteLoader(API, {
+        fetchFn: net.fetchFn,
+        store,
+        storage: undefined,
+        sleep: async (ms: number) => {
+          time += ms
+        },
+        now: () => time,
+        overpassUrls: [MIRROR_A],
+      })
+    await make().load(BOX, new AbortController().signal, undefined, { overpassFirst: true })
+    const before = net.calls.filter((url) => url.startsWith(MIRROR_A)).length
+    const again = await make().load(BOX, new AbortController().signal, undefined, { overpassFirst: true })
+    const after = net.calls.filter((url) => url.startsWith(MIRROR_A)).length
+    expect(again.routes.length).toBeGreaterThan(0)
+    // Only the box query would be new; the route is saved too, so nothing is sent.
+    expect(after).toBe(before)
+  })
 })

@@ -263,7 +263,7 @@ export class RouteLoader {
     options: LoadOptions = {},
   ): Promise<LoadResult> {
     if (options.overpassFirst && this.overpassUrls.length > 0) {
-      return this.loadFromMirrors(box, signal, onUpdate)
+      return this.loadFromMirrors(box, signal, onUpdate, options.refresh)
     }
     const centre = centreOf(box)
     const tiles = tilesCovering(box)
@@ -410,24 +410,48 @@ export class RouteLoader {
     box: BoundingBox,
     signal: AbortSignal,
     onUpdate?: (result: LoadResult) => void,
+    refresh = false,
   ): Promise<LoadResult> {
     const routes = new Map<number, RouteSource>()
     const failures: LoadFailure[] = []
     const mirrorFailure = new TransportError('Overpass first')
-    let ids: number[]
-    try {
-      const text = await this.fromMirrors(overpassMapQuery(box), signal, mirrorFailure)
-      ids = subwayRouteIds(parseOsmJson(text))
-    } catch (error) {
-      if (signal.aborted) throw cancelled()
-      failures.push({ kind: 'map', url: this.overpassUrls[0], reason: describeError(error) })
-      return { routes: [], failures }
+    // The z14 quarters wholly inside the box are saved under the same keys the OSM path uses.
+    // When every one of them is saved, the box is answered from the store and no query is sent.
+    const inside = tilesCovering(box).flatMap((tile) =>
+      splitBox(tileBox(tile))
+        .map((part, index) => ({ key: `${FORMAT_VERSION}/${tileKey(tile)}/${index}`, part }))
+        .filter(({ part }) => within(part, box)),
+    )
+    let ids: number[] | undefined
+    if (!refresh && inside.length > 0) {
+      const saved = await Promise.all(inside.map(({ key }) => this.store.get(key)))
+      if (saved.every((entry) => entry !== undefined)) {
+        ids = [...new Set(saved.flatMap((entry) => (entry?.value as number[] | undefined) ?? []))]
+      }
     }
+    if (ids === undefined) {
+      try {
+        const text = await this.fromMirrors(overpassMapQuery(box), signal, mirrorFailure)
+        ids = subwayRouteIds(parseOsmJson(text))
+      } catch (error) {
+        if (signal.aborted) throw cancelled()
+        failures.push({ kind: 'map', url: this.overpassUrls[0], reason: describeError(error) })
+        return { routes: [], failures }
+      }
+      // The query covered each quarter entirely, so its routes are the ones the quarter needs.
+      for (const { key } of inside) this.save(key, ids)
+    }
+    const found = ids
     await Promise.all(
-      ids.map(async (id) => {
+      found.map(async (id) => {
         try {
-          const text = await this.fromMirrors(overpassRelationQuery(id), signal, mirrorFailure)
-          routes.set(id, relationRoute(parseOsmJson(text), id))
+          routes.set(
+            id,
+            await this.remember(`route/${FORMAT_VERSION}/${id}`, signal, async (s) => {
+              const text = await this.fromMirrors(overpassRelationQuery(id), s, mirrorFailure)
+              return relationRoute(parseOsmJson(text), id)
+            }, { force: refresh, outdated: outdatedRoute }),
+          )
         } catch (error) {
           if (!signal.aborted) failures.push({ kind: 'relation', url: this.overpassUrls[0], reason: describeError(error) })
         }
@@ -586,6 +610,11 @@ function cancelled(): DOMException {
 
 function throwIfCancelled(signal: AbortSignal): void {
   if (signal.aborted) throw cancelled()
+}
+
+/** True when a lies wholly inside b. */
+function within(a: BoundingBox, b: BoundingBox): boolean {
+  return a.west >= b.west && a.east <= b.east && a.south >= b.south && a.north <= b.north
 }
 
 function centreOf(box: BoundingBox): { lat: number; lon: number } {
