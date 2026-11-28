@@ -56,9 +56,9 @@ describe('stopsToGeoJSON', () => {
       route(3, '#ff0000', [stop, { ...stop, key: 'n2', lat: -22.91, lon: -43.19 }, { ...stop, key: 'n3', name: 'Uruguai' }]),
     ])
     expect(collection.features.map((feature) => feature.properties)).toEqual([
-      { name: 'Carioca', label: 'Carioca', primary: 'true', colour: '#ff0000' },
-      { name: 'Carioca', label: '', primary: 'false', colour: '#ff0000' },
-      { name: 'Uruguai', label: 'Uruguai', primary: 'true', colour: '#ff0000' },
+      { name: 'Carioca', label: 'Carioca', primary: 'true', colour: '#ff0000', lines: ['||'] },
+      { name: 'Carioca', label: '', primary: 'false', colour: '#ff0000', lines: ['||'] },
+      { name: 'Uruguai', label: 'Uruguai', primary: 'true', colour: '#ff0000', lines: ['||'] },
     ])
     expect(collection.features[0].geometry).toEqual({ type: 'Point', coordinates: [-43.18, -22.9] })
     expect(collection.features[1].geometry).toEqual({ type: 'Point', coordinates: [-43.19, -22.91] })
@@ -92,7 +92,7 @@ describe('badgesToGeoJSON', () => {
     ])
     expect(collection.features).toHaveLength(1)
     expect(collection.features[0].geometry.coordinates).toEqual([6, 6])
-    expect(collection.features[0].properties).toEqual({ ref: '1', colour: '#ffffff', textColour: '#000000', mode: '' })
+    expect(collection.features[0].properties).toEqual({ ref: '1', lineKey: '1||', colour: '#ffffff', textColour: '#000000', mode: '' })
   })
 })
 

@@ -14,13 +14,14 @@ import {
   type RouteSource,
 } from '@/core/data/geojson'
 import { IndexedDbStore } from '@/core/data/idb-store'
-import { routesInView } from '@/core/data/lines'
+import { lineKey, routesInView } from '@/core/data/lines'
 import { describeError, RouteLoader } from '@/core/data/route-loader'
 import { LayeredStore, MemoryStore } from '@/core/data/store'
 import { formatHash, parseHash } from '@/core/map/position'
 import { LOCATE_TIMEOUT_MS, LOCATE_ZOOM, locateErrorMessage } from '@/core/map/locate'
 import { baseStyleUrl } from './base-style'
 import { ensurePillImage } from './station-pill'
+import { emphasize, litLines, litStations, opacityFor, type NumberPaint } from './highlight'
 
 // MapLibre 6 resolves its worker next to its own module, which a bundler does
 // not emit. Pointing it at the bundled asset keeps the worker under the base path.
@@ -48,6 +49,8 @@ const STOP_SOURCE_ID = 'transit-stops'
 const STOP_LAYER_ID = 'transit-stops-circle'
 const STOP_ALL_LAYER_ID = 'transit-stops-all-circle'
 const STOP_LABEL_ID = 'transit-stops-name'
+// Layers a pointer can hover: the lines, their badges and the stations.
+const HOVER_LAYERS = [LAYER_ID, OVERVIEW_LAYER_ID, BADGE_LAYER_ID, STOP_LAYER_ID, STOP_ALL_LAYER_ID]
 // Stations served by two lines are drawn as a pill over their dot, with the colour of each line.
 const PILL_SOURCE_ID = 'transit-shared-stations'
 const PILL_LAYER_ID = 'transit-shared-stations-pill'
@@ -55,6 +58,8 @@ const PILL_LAYER_ID = 'transit-shared-stations-pill'
 const BADGE_MIN_ZOOM = 12
 // Stations are drawn, and named, from this zoom on.
 const STOP_MIN_ZOOM = 14
+// The radius of a station dot, growing from the lowest visible zoom to STOP_MIN_ZOOM.
+const STOP_RADIUS_ZOOMED: NumberPaint = ['interpolate', ['linear'], ['zoom'], config.lineVisibleZoom, 2, STOP_MIN_ZOOM, 4]
 // Wait for the map to settle before querying, so a fast pan or zoom sends one request.
 const MOVE_DEBOUNCE_MS = 400
 // The locate button sits in the navigation control's corner, under the zoom and compass buttons.
@@ -107,15 +112,20 @@ interface MapViewProps {
   target?: MapTarget
   setKnown: Dispatch<SetStateAction<RouteSource[]>>
   setSelectedId: Dispatch<SetStateAction<number | null>>
+  /** The line key of the selected line, or null. The other lines and stations are faded. */
+  selectedKey: string | null
   /** The routes with a point in the visible area, for the list of lines on screen. */
   setVisible: Dispatch<SetStateAction<RouteSource[]>>
   /** Set by the map to reload the visible area. The panel calls it from its own button. */
   reloadRef: { current: () => void }
 }
 
-export function MapView({ target, setKnown, setSelectedId, setVisible, reloadRef }: MapViewProps) {
+export function MapView({ target, setKnown, setSelectedId, selectedKey, setVisible, reloadRef }: MapViewProps) {
   const container = useRef<HTMLDivElement>(null)
   const mapRef = useRef<maplibregl.Map | null>(null)
+  // The selection and the restyling of the layers for it, which the map effect sets up once the map exists.
+  const selectedKeyRef = useRef<string | null>(selectedKey)
+  const applyHighlight = useRef<() => void>(() => {})
   const retry = useRef<() => void>(() => {})
   // Seconds until the OSM API is asked again after a rate limit, or null when no cooldown is running.
   const [waitSeconds, setWaitSeconds] = useState<number | null>(null)
@@ -125,6 +135,11 @@ export function MapView({ target, setKnown, setSelectedId, setVisible, reloadRef
   const [loadError, setLoadError] = useState<string | null>(null)
   // What went wrong with the last locate request, or null.
   const [locateError, setLocateError] = useState<string | null>(null)
+
+  useEffect(() => {
+    selectedKeyRef.current = selectedKey
+    applyHighlight.current()
+  }, [selectedKey])
 
   useEffect(() => {
     if (!container.current) return
@@ -259,6 +274,38 @@ export function MapView({ target, setKnown, setSelectedId, setVisible, reloadRef
       window.history.replaceState(null, '', hash)
     }
 
+    // Hover is kept here and read by applyHighlight, which restyles the layers. Nothing is redrawn.
+    let hoveredLine: string | null = null
+    let hoveredStation: string | null = null
+    applyHighlight.current = () => {
+      // The layers exist once the style has loaded; until then there is nothing to restyle.
+      if (!map.getLayer(LAYER_ID)) return
+      const selected = selectedKeyRef.current
+      const lineOpacity = opacityFor(selected, litLines(selected, hoveredLine))
+      const stationOpacity = opacityFor(selected, litStations(selected, hoveredStation))
+      const lineMatch = hoveredLine === null ? null : ['==', ['get', 'lineKey'], hoveredLine]
+      const stationMatch = hoveredStation === null ? null : ['==', ['get', 'name'], hoveredStation]
+      map.setPaintProperty(OVERVIEW_LAYER_ID, 'line-opacity', lineOpacity)
+      map.setPaintProperty(OVERVIEW_LAYER_ID, 'line-width', emphasize(3, 3, lineMatch))
+      map.setPaintProperty(CASING_LAYER_ID, 'line-opacity', lineOpacity)
+      map.setPaintProperty(CASING_LAYER_ID, 'line-width', emphasize(9, 3, lineMatch))
+      map.setPaintProperty(LAYER_ID, 'line-opacity', lineOpacity)
+      map.setPaintProperty(LAYER_ID, 'line-width', emphasize(6, 3, lineMatch))
+      map.setPaintProperty(BADGE_LAYER_ID, 'circle-opacity', lineOpacity)
+      map.setPaintProperty(BADGE_LAYER_ID, 'circle-stroke-opacity', lineOpacity)
+      map.setPaintProperty(BADGE_LAYER_ID, 'circle-radius', emphasize(10, 2, lineMatch))
+      map.setPaintProperty(BADGE_TEXT_ID, 'text-opacity', lineOpacity)
+      map.setPaintProperty(BADGE_MODE_ID, 'text-opacity', lineOpacity)
+      map.setPaintProperty(PILL_LAYER_ID, 'icon-opacity', stationOpacity)
+      map.setPaintProperty(STOP_LAYER_ID, 'circle-opacity', stationOpacity)
+      map.setPaintProperty(STOP_LAYER_ID, 'circle-stroke-opacity', stationOpacity)
+      map.setPaintProperty(STOP_LAYER_ID, 'circle-radius', emphasize(STOP_RADIUS_ZOOMED, 2, stationMatch))
+      map.setPaintProperty(STOP_ALL_LAYER_ID, 'circle-opacity', stationOpacity)
+      map.setPaintProperty(STOP_ALL_LAYER_ID, 'circle-stroke-opacity', stationOpacity)
+      map.setPaintProperty(STOP_ALL_LAYER_ID, 'circle-radius', emphasize(4, 2, stationMatch))
+      map.setPaintProperty(STOP_LABEL_ID, 'text-opacity', stationOpacity)
+    }
+
     // Stations move with their lanes below zoom 14, so they are placed again at each zoom.
     map.on('zoomend', () => {
       map.getSource<maplibregl.GeoJSONSource>(STOP_SOURCE_ID)?.setData(stopsToGeoJSON(shownRoutes, map.getZoom()))
@@ -310,7 +357,7 @@ export function MapView({ target, setKnown, setSelectedId, setVisible, reloadRef
         maxzoom: STOP_MIN_ZOOM,
         filter: ['==', ['get', 'primary'], 'true'],
         paint: {
-          'circle-radius': ['interpolate', ['linear'], ['zoom'], config.lineVisibleZoom, 2, STOP_MIN_ZOOM, 4],
+          'circle-radius': STOP_RADIUS_ZOOMED,
           'circle-color': '#ffffff',
           'circle-stroke-color': ['get', 'colour'],
           'circle-stroke-width': 2,
@@ -377,16 +424,43 @@ export function MapView({ target, setKnown, setSelectedId, setVisible, reloadRef
         layout: { 'text-field': ['get', 'mode'], 'text-font': ['Noto Sans Regular'], 'text-size': 10, 'text-offset': [0, -1.6], 'text-allow-overlap': true },
         paint: { 'text-color': '#5c5c63', 'text-halo-color': '#ffffff', 'text-halo-width': 1.5 },
       })
-      map.on('click', LAYER_ID, (event) => {
+      // Clicking a line selects it, and clicking the selected line again clears the selection.
+      map.on('click', [LAYER_ID, OVERVIEW_LAYER_ID], (event) => {
         const id = Number(event.features?.[0]?.properties?.relationId)
-        if (Number.isFinite(id)) setSelectedId(id)
+        if (!Number.isFinite(id)) return
+        setSelectedId((current) => {
+          const selectedRoute = current === null ? undefined : seen.get(current)
+          const route = seen.get(id)
+          return selectedRoute && route && lineKey(selectedRoute) === lineKey(route) ? null : id
+        })
       })
-      map.on('mouseenter', LAYER_ID, () => {
-        map.getCanvas().style.cursor = 'pointer'
+      // A click on empty map clears the selection. Clicks on lines, stations and badges do not.
+      map.on('click', (event) => {
+        const layers = [...HOVER_LAYERS, PILL_LAYER_ID, STOP_LABEL_ID, BADGE_TEXT_ID, BADGE_MODE_ID].filter((id) => map.getLayer(id))
+        if (map.queryRenderedFeatures(event.point, { layers }).length === 0) setSelectedId(null)
       })
-      map.on('mouseleave', LAYER_ID, () => {
-        map.getCanvas().style.cursor = ''
+      // Hovering a line, badge or station highlights it and shows a pointer.
+      map.on('mousemove', (event) => {
+        const layers = HOVER_LAYERS.filter((id) => map.getLayer(id))
+        const hit = layers.length > 0 ? map.queryRenderedFeatures(event.point, { layers })[0] : undefined
+        const isStation = hit?.layer.id === STOP_LAYER_ID || hit?.layer.id === STOP_ALL_LAYER_ID
+        const key = hit?.properties.lineKey
+        const name = hit?.properties.name
+        const nextLine = hit && !isStation && typeof key === 'string' ? key : null
+        const nextStation = hit && isStation && typeof name === 'string' && name !== '' ? name : null
+        map.getCanvas().style.cursor = hit ? 'pointer' : ''
+        if (nextLine === hoveredLine && nextStation === hoveredStation) return
+        hoveredLine = nextLine
+        hoveredStation = nextStation
+        applyHighlight.current()
       })
+      map.on('mouseout', () => {
+        if (hoveredLine === null && hoveredStation === null) return
+        hoveredLine = null
+        hoveredStation = null
+        applyHighlight.current()
+      })
+      applyHighlight.current()
       void loadLines()
     })
     map.on('moveend', () => {

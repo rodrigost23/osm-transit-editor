@@ -1,7 +1,7 @@
 import { useRef, useState, type FormEvent } from 'react'
 import { config } from '@/core/config'
 import { modeLabel, type RouteSource, type Stop } from '@/core/data/geojson'
-import { groupLines, lineColour, lineVariants, routeCentre } from '@/core/data/lines'
+import { groupLines, lineColour, lineKey, lineVariants, routeCentre } from '@/core/data/lines'
 import { searchPlace } from '@/core/data/nominatim'
 import { describeError } from '@/core/data/route-loader'
 import { MapView, type MapTarget } from '@/ui/map/MapView'
@@ -70,6 +70,7 @@ export function StartScreen() {
         target={target}
         setKnown={setKnown}
         setSelectedId={setSelectedId}
+        selectedKey={selectedRoute ? lineKey(selectedRoute) : null}
         setVisible={setVisible}
         reloadRef={reloadRef}
       />

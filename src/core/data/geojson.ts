@@ -24,7 +24,7 @@ export interface RouteSource {
 export interface PointFeature {
   type: 'Feature'
   geometry: { type: 'Point'; coordinates: [number, number] }
-  properties: Record<string, string>
+  properties: Record<string, string | string[]>
 }
 
 export interface PointCollection {
@@ -39,6 +39,8 @@ export interface RouteProperties {
   operator: string
   colour: string
   colourValid: boolean
+  /** The line the route belongs to, as lineKey: ref, network and operator. */
+  lineKey: string
 }
 
 export interface RouteFeature {
@@ -113,6 +115,7 @@ export function stopsToGeoJSON(routes: readonly RouteSource[], zoom?: number): P
           label: firstWithName ? name : '',
           primary: String(firstWithName),
           colour,
+          lines: [...(linesAt.get(name || stop.key) ?? [])],
         },
       })
     }
@@ -232,7 +235,7 @@ export function badgesToGeoJSON(routes: readonly RouteSource[]): PointCollection
         {
           type: 'Feature' as const,
           geometry: { type: 'Point' as const, coordinates: point },
-          properties: { ref: group[0].tags.ref ?? '', colour, textColour: contrastText(colour), mode: modeLabel(group[0]) },
+          properties: { ref: group[0].tags.ref ?? '', lineKey: lineKey(group[0]), colour, textColour: contrastText(colour), mode: modeLabel(group[0]) },
         },
       ]
     }),
@@ -533,6 +536,7 @@ export function linesToGeoJSON(routes: readonly RouteSource[], zoom = 12): Overv
         geometry: { type: 'LineString', coordinates },
         properties: {
           relationId: first.id,
+          lineKey: lineKey(first),
           ref: first.tags.ref ?? '',
           name: first.tags.name ?? '',
           operator: first.tags.operator ?? '',
@@ -550,6 +554,8 @@ export interface SharedStationProperties {
   /** The colours of the first two lines that serve the station, in line order. */
   colourA: string
   colourB: string
+  /** The line keys of every line serving the station, as in stopsToGeoJSON. */
+  lines: string[]
   /** Screen angle, in degrees, of the line across the track: the long side of the station's shape. */
   angle: number
 }
@@ -608,7 +614,7 @@ export function sharedStationsToGeoJSON(routes: readonly RouteSource[], zoom = 1
     features.push({
       type: 'Feature' as const,
       geometry: { type: 'Point' as const, coordinates: [midLon, midLat] as [number, number] },
-      properties: { colourA: first.colour, colourB: second.colour, angle },
+      properties: { colourA: first.colour, colourB: second.colour, angle, lines: [...station.lines.keys()].map((line) => lineKey(mains[line].route)) },
     })
   }
   return { type: 'FeatureCollection', features }
@@ -661,6 +667,7 @@ export function routesToGeoJSON(routes: readonly RouteSource[]): RouteCollection
           geometry: { type: 'MultiLineString' as const, coordinates: route.lines },
           properties: {
             relationId: route.id,
+            lineKey: lineKey(route),
             ref: route.tags.ref ?? '',
             name: route.tags.name ?? '',
             operator: route.tags.operator ?? '',

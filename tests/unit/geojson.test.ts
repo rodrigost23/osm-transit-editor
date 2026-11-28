@@ -36,6 +36,7 @@ describe('routesToGeoJSON', () => {
   it('copies the tags into properties and marks the colour as valid', () => {
     expect(routesToGeoJSON([route]).features[0].properties).toEqual({
       relationId: 7944060,
+      lineKey: '1||Metrô Rio',
       ref: '1',
       name: 'Metrô Rio Linha 1',
       operator: 'Metrô Rio',
