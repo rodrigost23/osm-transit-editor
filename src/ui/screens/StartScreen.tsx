@@ -5,6 +5,9 @@ import { groupLines, lineColour, lineName, routeCentre } from '@/core/data/lines
 import { searchPlace } from '@/core/data/nominatim'
 import { describeError } from '@/core/data/route-loader'
 import { MapView, type MapTarget } from '@/ui/map/MapView'
+import { Badge } from '@/ui/components/ui/badge'
+import { Card } from '@/ui/components/ui/card'
+import { cn } from '@/lib/utils'
 
 // A floating panel over the full-screen map. Place search goes to Nominatim on submit.
 // The list shows the lines on screen, from the routes already loaded, so it needs no request.
@@ -54,43 +57,61 @@ export function StartScreen() {
         setSelectedId={setSelectedId}
         setVisible={setVisible}
       />
-      <section className="start-panel" aria-label="Find a transit line">
-        <header className="start-header">
-          <span className="app-name">OSM Transit Editor</span>
-          <span className="read-only">Read-only</span>
+      <Card className="absolute top-4 left-4 z-10 w-[min(320px,calc(100vw-32px))] gap-0 p-4">
+        <header className="mb-3 flex items-baseline justify-between">
+          <span className="text-base font-semibold tracking-tight">OSM Transit Editor</span>
+          <Badge variant="outline" className="font-normal">Read-only</Badge>
         </header>
-        <form className="start-form" onSubmit={search}>
-          <label htmlFor="place-search">Go to a place</label>
+        <form onSubmit={search} className="grid gap-1.5">
+          <label htmlFor="place-search" className="text-xs font-medium text-muted-foreground">
+            Go to a place
+          </label>
           <input
             id="place-search"
             type="search"
             placeholder="e.g. Rio de Janeiro"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
+            className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-2 focus-visible:outline-ring"
           />
         </form>
-        <div className="start-form">
-          <span className="start-label">Lines on screen</span>
-          {lines.length === 0 && <p className="start-note">No lines on screen. Zoom in or pan to load some.</p>}
+        <div className="mt-4 grid gap-2">
+          <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Lines on screen</span>
+          {lines.length === 0 && (
+            <p className="text-sm text-muted-foreground">No lines on screen. Zoom in or pan to load some.</p>
+          )}
           {lines.length > 0 && (
-            <ul className="line-results">
+            <ul className="grid max-h-[40vh] gap-1.5 overflow-y-auto">
               {lines.map((group) => (
                 <li key={group[0].id}>
-                  <button type="button" onClick={() => chooseLine(group)}>
-                    <span className="line-badge" style={{ background: lineColour(group[0]) }}>
+                  <button
+                    type="button"
+                    onClick={() => chooseLine(group)}
+                    className="flex w-full cursor-pointer items-center gap-3 rounded-md border border-border bg-background px-3 py-2 text-left text-sm hover:bg-muted"
+                  >
+                    <span
+                      className="inline-flex min-w-7 justify-center rounded-md px-1.5 py-0.5 text-xs font-bold text-white"
+                      style={{ background: lineColour(group[0]) }}
+                    >
                       {group[0].tags.ref || '?'}
                     </span>
-                    <span>{lineName(group[0])}</span>
-                    <span className="line-mode">{modeLabel(group[0])}</span>
+                    <span className="flex-1 leading-snug">{lineName(group[0])}</span>
+                    <span className="text-xs text-muted-foreground">{modeLabel(group[0])}</span>
                   </button>
                 </li>
               ))}
             </ul>
           )}
         </div>
-        {status && <p className="start-note" role="status">{status}</p>}
-        <p className="start-note">Place search by Nominatim. Map data © OpenStreetMap contributors.</p>
-      </section>
+        {status && (
+          <p role="status" className={cn('mt-3 text-xs text-muted-foreground')}>
+            {status}
+          </p>
+        )}
+        <p className="mt-3 text-xs text-muted-foreground">
+          Place search by Nominatim. Map data © OpenStreetMap contributors.
+        </p>
+      </Card>
     </>
   )
 }

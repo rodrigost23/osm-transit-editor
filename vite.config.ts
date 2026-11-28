@@ -1,5 +1,6 @@
 import { fileURLToPath, URL } from 'node:url'
 import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
 import { loadEnv, type Plugin } from 'vite'
 import { defineConfig } from 'vitest/config'
 
@@ -55,7 +56,7 @@ export default defineConfig(({ mode }) => {
   return {
     // The deploy workflow sets VITE_BASE=/<repository>/ for GitHub Pages.
     base: env.VITE_BASE || '/',
-    plugins: [react(), contentSecurityPolicy(endpoints)],
+    plugins: [react(), tailwindcss(), contentSecurityPolicy(endpoints)],
     define: Object.fromEntries(
       Object.entries(endpoints).map(([key, value]) => [
         `import.meta.env.${key}`,

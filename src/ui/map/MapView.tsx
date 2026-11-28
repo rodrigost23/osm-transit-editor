@@ -1,3 +1,4 @@
+import { Button } from '@/ui/components/ui/button'
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react'
 import * as maplibregl from 'maplibre-gl'
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url'
@@ -33,6 +34,7 @@ export interface MapTarget {
 }
 
 const SOURCE_ID = 'transit-routes'
+const CASING_LAYER_ID = 'routes-casing'
 const LAYER_ID = 'transit-routes-line'
 // Zoomed out, one line per route name, drawn from the visible zoom up to the zoom where routes take over.
 const OVERVIEW_SOURCE_ID = 'transit-overview'
@@ -213,13 +215,22 @@ export function MapView({ target, known, setKnown, selectedId, setSelectedId, se
       })
       map.addSource(BADGE_SOURCE_ID, { type: 'geojson', data: emptyPoints })
       map.addSource(STOP_SOURCE_ID, { type: 'geojson', data: emptyPoints })
+      // A white casing under each route keeps it readable over the basemap.
+      map.addLayer({
+        id: CASING_LAYER_ID,
+        type: 'line',
+        source: SOURCE_ID,
+        minzoom: config.minLineZoom,
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: { 'line-color': '#ffffff', 'line-width': 9 },
+      })
       map.addLayer({
         id: LAYER_ID,
         type: 'line',
         source: SOURCE_ID,
         minzoom: config.minLineZoom,
         layout: { 'line-cap': 'round', 'line-join': 'round' },
-        paint: { 'line-color': ['get', 'colour'], 'line-width': 4 },
+        paint: { 'line-color': ['get', 'colour'], 'line-width': 6 },
       })
       // Stations sit under the badges, and are named from STOP_MIN_ZOOM on.
       map.addLayer({
@@ -316,9 +327,9 @@ export function MapView({ target, known, setKnown, selectedId, setSelectedId, se
         </p>
       )}
       {!zoomedOut && (
-        <button type="button" className="map-reload" onClick={() => reload.current()}>
+        <Button variant="outline" size="sm" className="absolute bottom-3 left-3 z-10 bg-card shadow-md" onClick={() => reload.current()}>
           Reload visible area
-        </button>
+        </Button>
       )}
       {selected && (
         <LineCard line={selected} variants={lineVariants(known, selected.id)} onClose={() => setSelectedId(null)} />
