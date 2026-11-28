@@ -24,7 +24,7 @@ const FULL_XML = `<osm version="0.6">
   <relation id="7"><member type="way" ref="10" role=""/><member type="way" ref="11" role=""/><tag k="route" v="subway"/><tag k="ref" v="1"/></relation>
 </osm>`
 
-function fakeApi(options: { maxWidth?: number; delayMs?: number } = {}) {
+function fakeApi(options: { maxWidth?: number; delayMs?: number; failMap?: number | 'network'; failFull?: number | 'network' } = {}) {
   const calls: string[] = []
   let active = 0
   let peak = 0
@@ -34,7 +34,15 @@ function fakeApi(options: { maxWidth?: number; delayMs?: number } = {}) {
     peak = Math.max(peak, active)
     try {
       if (options.delayMs) await new Promise((resolve) => setTimeout(resolve, options.delayMs))
-      if (url.includes('/relation/')) return new Response(FULL_XML, { status: 200 })
+      if (url.includes('/relation/')) {
+        if (options.failFull === 'network') throw new TypeError('Failed to fetch')
+        if (options.failFull) return new Response('nope', { status: options.failFull })
+        return new Response(FULL_XML, { status: 200 })
+      }
+      if (options.failMap === 'network') throw new TypeError('Failed to fetch')
+      if (options.failMap && calls.filter((call) => call.includes('/map?')).length === 1) {
+        return new Response('nope', { status: options.failMap })
+      }
       const bbox = new URL(url).searchParams.get('bbox') ?? ''
       const [west = 0, , east = 0] = bbox.split(',').map(Number)
       if (options.maxWidth && east - west > options.maxWidth) return new Response('too big', { status: 400 })
@@ -78,8 +86,9 @@ describe('relationRoute edge cases', () => {
 describe('RouteLoader', () => {
   it('loads the subway routes of the visible tiles and only those', async () => {
     const api = fakeApi()
-    const routes = await new RouteLoader(API, api.fetchFn).load(oneTile, signal())
-    expect(routes?.map((route) => route.id)).toEqual([7])
+    const result = await new RouteLoader(API, api.fetchFn).load(oneTile, signal())
+    expect(result?.routes.map((route) => route.id)).toEqual([7])
+    expect(result?.failures).toEqual([])
     expect(api.calls).toEqual([
       expect.stringContaining('/api/0.6/map?bbox='),
       `${API}/api/0.6/relation/7/full`,
@@ -97,8 +106,8 @@ describe('RouteLoader', () => {
 
   it('splits a box the API refuses as too large, then keeps the routes it finds', async () => {
     const api = fakeApi({ maxWidth: 0.015 })
-    const routes = await new RouteLoader(API, api.fetchFn).load(oneTile, signal())
-    expect(routes?.map((route) => route.id)).toEqual([7])
+    const result = await new RouteLoader(API, api.fetchFn).load(oneTile, signal())
+    expect(result?.routes.map((route) => route.id)).toEqual([7])
     // The whole tile is refused, then its four quarters are asked for.
     expect(api.calls.filter((url) => url.includes('/map?')).length).toBe(5)
   })
@@ -126,5 +135,39 @@ describe('RouteLoader', () => {
     controller.abort()
     await expect(new RouteLoader(API, api.fetchFn).load(oneTile, controller.signal)).rejects.toThrow()
     expect(api.calls).toHaveLength(0)
+  })
+
+  it('reports a failed relation and still returns the routes that loaded', async () => {
+    const api = fakeApi({ failFull: 500 })
+    const result = await new RouteLoader(API, api.fetchFn).load(oneTile, signal())
+    expect(result?.routes).toEqual([])
+    expect(result?.failures).toEqual([{ kind: 'relation', url: `${API}/api/0.6/relation/7/full`, reason: 'HTTP 500' }])
+  })
+
+  it('draws the tiles that loaded when one tile fails', async () => {
+    const api = fakeApi({ failMap: 503 })
+    const first = tileBox({ x: 6226, y: 9263, z: 14 })
+    const last = tileBox({ x: 6227, y: 9264, z: 14 })
+    const box = { south: last.south + 0.001, north: first.north - 0.001, west: first.west + 0.001, east: last.east - 0.001 }
+    const result = await new RouteLoader(API, api.fetchFn).load(box, signal())
+    expect(result?.routes.map((route) => route.id)).toEqual([7])
+    expect(result?.failures).toEqual([expect.objectContaining({ kind: 'map', reason: 'HTTP 503' })])
+  })
+
+  it('explains a network failure, such as a blocked or CORS request', async () => {
+    const api = fakeApi({ failMap: 'network' })
+    const result = await new RouteLoader(API, api.fetchFn).load(oneTile, signal())
+    expect(result?.failures[0].reason).toContain('network error')
+  })
+
+  it('stops sending requests for a while after a rate limit', async () => {
+    const api = fakeApi({ failMap: 429 })
+    const first = tileBox({ x: 6226, y: 9263, z: 14 })
+    const last = tileBox({ x: 6229, y: 9266, z: 14 })
+    const box = { south: last.south + 0.001, north: first.north - 0.001, west: first.west + 0.001, east: last.east - 0.001 }
+    const result = await new RouteLoader(API, api.fetchFn).load(box, signal())
+    // Two requests were already in flight; the other tiles are not sent.
+    expect(api.calls.filter((url) => url.includes('/map?'))).toHaveLength(2)
+    expect(result?.failures.every((failure) => failure.reason.startsWith('HTTP 429') || failure.reason.startsWith('Paused'))).toBe(true)
   })
 })

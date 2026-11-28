@@ -4,7 +4,7 @@ import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { config } from '@/core/config'
 import { routesToGeoJSON, type RouteCollection } from '@/core/data/geojson'
-import { RouteLoader } from '@/core/data/route-loader'
+import { describeError, RouteLoader } from '@/core/data/route-loader'
 import { formatHash, parseHash } from '@/core/map/position'
 import { baseStyleUrl } from './base-style'
 
@@ -23,7 +23,8 @@ export function MapView() {
   const retry = useRef<() => void>(() => {})
   const [zoomedOut, setZoomedOut] = useState(false)
   const [loading, setLoading] = useState(false)
-  const [loadError, setLoadError] = useState(false)
+  // What went wrong with the last load, or null when everything in view loaded.
+  const [loadError, setLoadError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!container.current) return
@@ -47,7 +48,7 @@ export function MapView() {
         source.setData(emptyRoutes)
         setZoomedOut(true)
         setLoading(false)
-        setLoadError(false)
+        setLoadError(null)
         return
       }
       setZoomedOut(false)
@@ -56,20 +57,34 @@ export function MapView() {
       const bounds = map.getBounds()
       setLoading(true)
       try {
-        const routes = await loader.load(
+        const result = await loader.load(
           { south: bounds.getSouth(), west: bounds.getWest(), north: bounds.getNorth(), east: bounds.getEast() },
           current.signal,
         )
         // Null means the view covers too many tiles to load at once.
-        source.setData(routes ? routesToGeoJSON(routes) : emptyRoutes)
-        setZoomedOut(routes === null)
+        if (result === null) {
+          source.setData(emptyRoutes)
+          setZoomedOut(true)
+          setLoadError(null)
+        } else {
+          // Routes that did load are drawn even when some requests failed.
+          source.setData(routesToGeoJSON(result.routes))
+          if (result.failures.length > 0) {
+            console.error('Some subway route requests failed:', result.failures)
+            const first = result.failures[0]
+            setLoadError(
+              `${result.failures.length} of the requests for this view failed (${first.reason}, ${first.kind} ${first.url}). Routes that loaded are shown.`,
+            )
+          } else {
+            setLoadError(null)
+          }
+        }
         setLoading(false)
-        setLoadError(false)
       } catch (error) {
         if (current.signal.aborted) return
         console.error('Could not load subway routes:', error)
         setLoading(false)
-        setLoadError(true)
+        setLoadError(`Could not load lines: ${describeError(error)}.`)
       }
     }
     retry.current = () => void loadLines()
@@ -116,7 +131,7 @@ export function MapView() {
       {loading && !zoomedOut && !loadError && <p className="zoom-hint">Loading lines…</p>}
       {loadError && (
         <div className="map-notice" role="alert">
-          <span>Could not load lines. The OpenStreetMap API may be busy.</span>
+          <span>{loadError}</span>
           <button type="button" onClick={() => retry.current()}>
             Try again
           </button>

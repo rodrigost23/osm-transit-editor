@@ -8,14 +8,41 @@ const CONCURRENCY = 2
 const MAX_TILES = 24
 // A box the API refuses as too large is split into quarters, up to this depth.
 const MAX_SPLIT_DEPTH = 2
+// After a rate limit (429) or a bandwidth limit (509), no new requests are sent for a while.
+const PAUSE_MS = 30_000
 
 export class OsmHttpError extends Error {
   readonly status: number
 
   constructor(status: number) {
-    super(`OpenStreetMap API responded ${status}`)
+    super(`HTTP ${status}`)
     this.status = status
   }
+}
+
+/** A request that did not give a route. The rest of the view still loads. */
+export interface LoadFailure {
+  kind: 'map' | 'relation'
+  url: string
+  reason: string
+}
+
+export interface LoadResult {
+  routes: RouteSource[]
+  failures: LoadFailure[]
+}
+
+/** Text that says why a request failed, for the console and the notice on the map. */
+export function describeError(error: unknown): string {
+  if (error instanceof OsmHttpError) {
+    if (error.status === 429) return 'HTTP 429 (rate limited)'
+    if (error.status === 509) return 'HTTP 509 (bandwidth limit)'
+    return `HTTP ${error.status}`
+  }
+  // fetch() rejects with a TypeError when the request never gets a response: offline, blocked, or CORS.
+  if (error instanceof TypeError) return 'network error (no response: offline, blocked, or CORS)'
+  if (error instanceof Error) return error.message
+  return String(error)
 }
 
 /** Subway relation ids in a map response. */
@@ -45,6 +72,7 @@ export function relationRoute(data: OsmData, id: number): RouteSource {
 }
 
 export function mapUrl(apiUrl: string, box: BoundingBox): string {
+  // The API takes the bounds as left, bottom, right, top.
   const bbox = [box.west, box.south, box.east, box.north].join(',')
   return `${apiUrl}/api/0.6/map?bbox=${bbox}`
 }
@@ -56,14 +84,16 @@ export function relationFullUrl(apiUrl: string, id: number): string {
 type Fetch = (url: string, init?: RequestInit) => Promise<Response>
 
 /**
- * Loads subway routes for the visible area, tile by tile. Tiles and routes that were
- * already loaded are kept, so panning back and forth does not repeat requests.
+ * Loads subway routes for the visible area, tile by tile. A tile or route that fails is
+ * reported and the rest still loads. Loaded tiles and routes are kept, so panning back
+ * and forth does not repeat requests, and failed ones are asked for again next time.
  */
 export class RouteLoader {
   private readonly tileRelations = new Map<string, number[]>()
   private readonly routes = new Map<number, RouteSource>()
   private active = 0
   private readonly waiting: (() => void)[] = []
+  private pausedUntil = 0
 
   private readonly apiUrl: string
   private readonly fetchFn: Fetch
@@ -74,17 +104,38 @@ export class RouteLoader {
   }
 
   /** Routes that cross the box, or null when the box covers too many tiles to load. */
-  async load(box: BoundingBox, signal: AbortSignal): Promise<RouteSource[] | null> {
+  async load(box: BoundingBox, signal: AbortSignal): Promise<LoadResult | null> {
     const tiles = tilesCovering(box)
     if (tiles.length > MAX_TILES) return null
-    await Promise.all(tiles.map((tile) => this.loadTile(tile, signal)))
+
+    const failures: LoadFailure[] = []
+    const tileOutcomes = await Promise.allSettled(tiles.map((tile) => this.loadTile(tile, signal)))
+    throwIfCancelled(signal)
+    tileOutcomes.forEach((outcome, index) => {
+      if (outcome.status === 'rejected') {
+        failures.push({ kind: 'map', url: mapUrl(this.apiUrl, tileBox(tiles[index])), reason: describeError(outcome.reason) })
+      }
+    })
 
     const ids = new Set<number>()
     for (const tile of tiles) {
       for (const id of this.tileRelations.get(tileKey(tile)) ?? []) ids.add(id)
     }
-    await Promise.all([...ids].filter((id) => !this.routes.has(id)).map((id) => this.loadRoute(id, signal)))
-    return [...ids].flatMap((id) => this.routes.get(id) ?? [])
+    const missing = [...ids].filter((id) => !this.routes.has(id))
+    const routeOutcomes = await Promise.allSettled(missing.map((id) => this.loadRoute(id, signal)))
+    throwIfCancelled(signal)
+    routeOutcomes.forEach((outcome, index) => {
+      if (outcome.status === 'rejected') {
+        failures.push({
+          kind: 'relation',
+          url: relationFullUrl(this.apiUrl, missing[index]),
+          reason: describeError(outcome.reason),
+        })
+      }
+    })
+
+    const routes = [...ids].flatMap((id) => this.routes.get(id) ?? [])
+    return { routes, failures }
   }
 
   private async loadTile(tile: Tile, signal: AbortSignal): Promise<void> {
@@ -119,8 +170,10 @@ export class RouteLoader {
   }
 
   private get(url: string, signal: AbortSignal): Promise<string> {
+    // A plain GET with no custom headers, so the browser needs no CORS preflight.
     return this.limited(signal, async () => {
       const response = await this.fetchFn(url, { signal })
+      if (response.status === 429 || response.status === 509) this.pausedUntil = Date.now() + PAUSE_MS
       if (!response.ok) throw new OsmHttpError(response.status)
       return response.text()
     })
@@ -131,7 +184,8 @@ export class RouteLoader {
     if (this.active < CONCURRENCY) this.active++
     else await new Promise<void>((resolve) => this.waiting.push(resolve))
     try {
-      if (signal.aborted) throw new DOMException('Request cancelled', 'AbortError')
+      throwIfCancelled(signal)
+      if (Date.now() < this.pausedUntil) throw new Error('Paused after a rate limit; not sending more requests yet')
       return await task()
     } finally {
       const next = this.waiting.shift()
@@ -139,6 +193,10 @@ export class RouteLoader {
       else this.active--
     }
   }
+}
+
+function throwIfCancelled(signal: AbortSignal): void {
+  if (signal.aborted) throw new DOMException('Request cancelled', 'AbortError')
 }
 
 function tileKey({ x, y, z }: Tile): string {
