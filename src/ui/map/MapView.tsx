@@ -100,6 +100,23 @@ export function MapView({ target, known, setKnown, selectedId, setSelectedId }: 
       controller?.abort()
       if (map.getZoom() < config.minLineZoom) {
         // Zoomed out, nothing is requested. Lines loaded so far stay on the map.
+        const current = new AbortController()
+        controller = current
+        if (map.getZoom() >= config.lineVisibleZoom) {
+          // Routes saved by earlier visits show from the visible zoom on, without a request.
+          const bounds = map.getBounds()
+          const saved = await loader
+            .cached({ south: bounds.getSouth(), west: bounds.getWest(), north: bounds.getNorth(), east: bounds.getEast() }, current.signal)
+            .catch(() => null)
+          if (current.signal.aborted) return
+          let added = false
+          for (const route of saved ?? []) {
+            if (seen.has(route.id)) continue
+            seen.set(route.id, route)
+            added = true
+          }
+          if (added) setKnown([...seen.values()])
+        }
         const routes = [...seen.values()]
         const next = drawn.next(routes)
         if (next) show(routes, next)

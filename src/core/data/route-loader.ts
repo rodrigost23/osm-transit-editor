@@ -7,6 +7,8 @@ import { splitBox, tileBox, tilesCovering, type BoundingBox, type Tile } from '.
 const CONCURRENCY = 2
 // Only the tiles nearest the map centre are loaded, so panning is not met with a flood of requests.
 const NEAREST_TILES = 6
+// Zoomed out, the cache is read for up to this many tiles nearest the centre. Reads are local, but a wide view has many tiles.
+const CACHED_TILES = 64
 const REQUEST_TIMEOUT_MS = 30_000
 // Network errors and timeouts are retried with a growing delay, for up to this long.
 const RETRY_WINDOW_MS = 60_000
@@ -215,6 +217,30 @@ export class RouteLoader {
     )
     throwIfCancelled(signal)
     return { routes: [...routes.values()], failures }
+  }
+
+  /**
+   * The routes already in the store for the box, whatever their age, without any request. Used
+   * where the map does not load lines, so that routes saved earlier show as soon as the map opens.
+   */
+  async cached(box: BoundingBox, signal: AbortSignal): Promise<RouteSource[]> {
+    const centre = centreOf(box)
+    const tiles = tilesCovering(box)
+      .sort((a, b) => distance(centreOf(tileBox(a)), centre) - distance(centreOf(tileBox(b)), centre))
+      .slice(0, CACHED_TILES)
+    const ids = new Set<number>()
+    await Promise.all(
+      tiles.flatMap((tile) =>
+        splitBox(tileBox(tile)).map(async (_, index) => {
+          const saved = await this.store.get(`${FORMAT_VERSION}/${tileKey(tile)}/${index}`)
+          for (const id of (saved?.value as number[] | undefined) ?? []) ids.add(id)
+        }),
+      ),
+    )
+    throwIfCancelled(signal)
+    const saved = await Promise.all([...ids].map((id) => this.store.get(`route/${FORMAT_VERSION}/${id}`)))
+    throwIfCancelled(signal)
+    return saved.flatMap((entry) => (entry ? [entry.value as RouteSource] : []))
   }
 
   /** Answers from the store when it can, and saves what it fetched when it succeeds. */
