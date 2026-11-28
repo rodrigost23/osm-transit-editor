@@ -1,9 +1,11 @@
-import type { Entry, Store } from './store'
+import { withTimeout, type Entry, type Store } from './store'
 
 const DB_NAME = 'osm-transit-editor'
 const STORE_NAME = 'cache'
 // Oldest entries are removed beyond this many, to keep the database small.
 const MAX_ENTRIES = 1200
+// Opening the database is given up after this long. Some browsers never answer it in private windows.
+const OPEN_TIMEOUT_MS = 1500
 
 /**
  * Keeps downloaded map data in IndexedDB across visits. Every operation fails quietly
@@ -13,7 +15,7 @@ export class IndexedDbStore implements Store {
   private readonly database: Promise<IDBDatabase | undefined>
 
   constructor() {
-    this.database = openDatabase()
+    this.database = withTimeout(openDatabase(), OPEN_TIMEOUT_MS, undefined)
   }
 
   async get(key: string): Promise<Entry | undefined> {

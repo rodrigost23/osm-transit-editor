@@ -26,6 +26,16 @@ describe('LayeredStore', () => {
     expect((await memory.get('a'))?.value).toBe('from disk')
   })
 
+  it('treats a disk layer that never answers as a miss', async () => {
+    const never: Store = {
+      get: () => new Promise<never>(() => {}),
+      set: () => new Promise<never>(() => {}),
+    }
+    const store = new LayeredStore(new MemoryStore(10), never, 10)
+    expect(await store.get('a')).toBeUndefined()
+    await expect(store.set('a', entry('a'))).resolves.toBeUndefined()
+  })
+
   it('keeps working when the disk layer fails', async () => {
     const broken: Store = {
       get: async () => {

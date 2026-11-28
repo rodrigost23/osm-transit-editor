@@ -40,26 +40,51 @@ export class MemoryStore implements Store {
   }
 }
 
-/** Reads the memory layer first, then the disk layer. Disk errors are ignored: the cache is optional. */
+/** Resolves with the promise's value, or with the fallback if it fails or takes longer than ms. */
+export function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(fallback), ms)
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      () => {
+        clearTimeout(timer)
+        resolve(fallback)
+      },
+    )
+  })
+}
+
+// Disk reads and writes are given up after this long, so a stuck database cannot stop the network.
+const DISK_TIMEOUT_MS = 1500
+
+/**
+ * Reads the memory layer first, then the disk layer. The disk layer is optional: its
+ * errors are ignored, and a read or write that takes too long is treated as a miss.
+ */
 export class LayeredStore implements Store {
   private readonly memory: Store
   private readonly disk: Store
+  private readonly diskTimeoutMs: number
 
-  constructor(memory: Store, disk: Store) {
+  constructor(memory: Store, disk: Store, diskTimeoutMs = DISK_TIMEOUT_MS) {
     this.memory = memory
     this.disk = disk
+    this.diskTimeoutMs = diskTimeoutMs
   }
 
   async get(key: string): Promise<Entry | undefined> {
     const inMemory = await this.memory.get(key)
     if (inMemory) return inMemory
-    const onDisk = await this.disk.get(key).catch(() => undefined)
+    const onDisk = await withTimeout(this.disk.get(key).catch(() => undefined), this.diskTimeoutMs, undefined)
     if (onDisk) await this.memory.set(key, onDisk)
     return onDisk
   }
 
   async set(key: string, entry: Entry): Promise<void> {
     await this.memory.set(key, entry)
-    await this.disk.set(key, entry).catch(() => undefined)
+    await withTimeout(this.disk.set(key, entry).catch(() => undefined), this.diskTimeoutMs, undefined)
   }
 }

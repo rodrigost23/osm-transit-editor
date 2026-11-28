@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { describeError, relationRoute, RouteLoader, subwayRouteIds } from '@/core/data/route-loader'
 import { parseOsmJson } from '@/core/data/osm-json'
-import { MemoryStore } from '@/core/data/store'
+import { LayeredStore, MemoryStore, type Store } from '@/core/data/store'
 import { tileBox } from '@/core/data/tiles'
 
 const API = 'https://osm.test'
@@ -71,7 +71,7 @@ function fakeClock() {
   }
 }
 
-function loaderFor(api: ReturnType<typeof fakeApi>, clock = fakeClock(), store = new MemoryStore(300)) {
+function loaderFor(api: ReturnType<typeof fakeApi>, clock = fakeClock(), store: Store = new MemoryStore(300)) {
   return new RouteLoader(API, { fetchFn: api.fetchFn, store, now: clock.now, sleep: clock.sleep })
 }
 
@@ -195,6 +195,16 @@ describe('RouteLoader', () => {
     const result = await loader.load(oneTile, signal())
     expect(result.routes.map((route) => route.id)).toEqual([7])
     await vi.waitFor(() => expect(api.calls.length).toBeGreaterThan(before))
+  })
+
+  it('still loads from the network when the disk cache never answers', async () => {
+    // Reproduces a stuck IndexedDB: the loader must not wait on it before asking the API.
+    const api = fakeApi()
+    const stuck: Store = { get: () => new Promise<never>(() => {}), set: () => new Promise<never>(() => {}) }
+    const store = new LayeredStore(new MemoryStore(300), stuck, 10)
+    const result = await loaderFor(api, fakeClock(), store).load(oneTile, signal())
+    expect(result.routes.map((route) => route.id)).toEqual([7])
+    expect(api.count('/map.json?bbox=')).toBe(4)
   })
 
   it('stops when the view is cancelled before the request starts', async () => {
