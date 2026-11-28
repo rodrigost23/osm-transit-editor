@@ -3,6 +3,8 @@
 export const config = {
   osmApiUrl: import.meta.env.VITE_OSM_API_URL,
   nominatimUrl: import.meta.env.VITE_NOMINATIM_URL,
+  /** Overpass mirrors, in order of preference. Used only when the OSM API cannot answer. */
+  overpassUrls: import.meta.env.VITE_OVERPASS_URLS.split(',').map((url) => url.trim()).filter(Boolean),
   /** Minimum zoom to query lines. Matches the tile zoom used for the OSM map calls. */
   minLineZoom: 14,
   /** Lines already loaded stay visible down to this zoom. Below it they are hidden. */

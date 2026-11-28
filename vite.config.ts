@@ -10,17 +10,28 @@ const endpointDefaults = {
 }
 type EndpointKey = keyof typeof endpointDefaults
 
+// Overpass mirrors, in order of preference. Used only when the OSM API cannot answer.
+const overpassDefault = [
+  'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
+  'https://overpass-api.de/api/interpreter',
+  'https://lz4.overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+  'https://overpass.openstreetmap.ru/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter',
+].join(',')
+
 // OpenFreeMap only draws the basemap (see src/ui/map/base-style.ts).
 const basemapOrigin = 'https://tiles.openfreemap.org'
 
 // Builds the Content Security Policy, with connect-src limited to the
 // configured endpoints. Applied to production builds only, because the Vite
 // dev server injects inline scripts.
-function contentSecurityPolicy(endpoints: Record<EndpointKey, string>): Plugin {
+function contentSecurityPolicy(endpoints: Record<EndpointKey, string>, overpassUrls: string[]): Plugin {
   const connectSrc = new Set([
     "'self'",
     basemapOrigin,
     ...Object.values(endpoints).map((url) => new URL(url).origin),
+    ...overpassUrls.map((url) => new URL(url).origin),
   ])
   const policy = [
     "default-src 'self'",
@@ -51,17 +62,21 @@ export default defineConfig(({ mode }) => {
       env[key] || endpointDefaults[key],
     ]),
   ) as Record<EndpointKey, string>
+  const overpassList = (env.VITE_OVERPASS_URLS || overpassDefault).split(',').map((url) => url.trim()).filter(Boolean)
 
   return {
     // The deploy workflow sets VITE_BASE=/<repository>/ for GitHub Pages.
     base: env.VITE_BASE || '/',
-    plugins: [react(), contentSecurityPolicy(endpoints)],
-    define: Object.fromEntries(
-      Object.entries(endpoints).map(([key, value]) => [
-        `import.meta.env.${key}`,
-        JSON.stringify(value),
-      ]),
-    ),
+    plugins: [react(), contentSecurityPolicy(endpoints, overpassList)],
+    define: {
+      ...Object.fromEntries(
+        Object.entries(endpoints).map(([key, value]) => [
+          `import.meta.env.${key}`,
+          JSON.stringify(value),
+        ]),
+      ),
+      'import.meta.env.VITE_OVERPASS_URLS': JSON.stringify(overpassList.join(',')),
+    },
     resolve: {
       alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
     },

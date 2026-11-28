@@ -73,6 +73,8 @@ export interface LoaderOptions {
   storage?: CooldownStorage
   /** Called when a cooldown starts, with the time (ms since epoch) it ends. */
   onCooldown?: (until: number) => void
+  /** Overpass mirrors, in order of preference. Used only when the OSM API cannot answer. */
+  overpassUrls?: string[]
 }
 
 interface Cooldown {
@@ -161,6 +163,30 @@ export function relationFullUrl(apiUrl: string, id: number): string {
   return `${apiUrl}/api/0.6/relation/${id}/full.json`
 }
 
+/** Overpass query for the subway relations in a box. Same answer as the map call, in Overpass JSON. */
+export function overpassMapQuery(box: BoundingBox): string {
+  // Overpass takes the bounds as south, west, north, east.
+  const bbox = [box.south, box.west, box.north, box.east].join(',')
+  return `[out:json][timeout:25];relation["route"="subway"](${bbox});out body;`
+}
+
+/** Overpass query for one route relation with its ways and nodes. Same answer as the full call. */
+export function overpassRelationQuery(id: number): string {
+  return `[out:json][timeout:25];relation(${id});(._;>;);out body;`
+}
+
+/** GET URL for an Overpass mirror. A plain GET needs no CORS preflight. */
+export function overpassUrl(mirror: string, query: string): string {
+  return `${mirror}?data=${encodeURIComponent(query)}`
+}
+
+// Errors from the OSM API that send the request on to a mirror. Cooldowns (429, 503, 509) do not:
+// they mean the OSM API asked us to wait, and a mirror answer would not change that.
+function fallsBackToMirror(error: unknown): boolean {
+  if (error instanceof TransportError) return true
+  return error instanceof OsmHttpError && error.status >= 500 && !COOLING_STATUS.has(error.status)
+}
+
 const defaultSleep: Sleep = (ms, signal) =>
   new Promise((resolve, reject) => {
     const onAbort = () => {
@@ -200,6 +226,7 @@ export class RouteLoader {
   private readonly sleep: Sleep
   private readonly storage: CooldownStorage | undefined
   private readonly onCooldown: ((until: number) => void) | undefined
+  private readonly overpassUrls: string[]
   private active = 0
   private readonly waiting: (() => void)[] = []
   private readonly refreshing = new Set<string>()
@@ -214,6 +241,7 @@ export class RouteLoader {
     this.sleep = options.sleep ?? defaultSleep
     this.storage = options.storage ?? defaultStorage()
     this.onCooldown = options.onCooldown
+    this.overpassUrls = options.overpassUrls ?? []
     this.pausedUntil = this.readCooldown()?.until ?? 0
   }
 
@@ -347,7 +375,7 @@ export class RouteLoader {
 
   private async fetchQuarter(box: BoundingBox, signal: AbortSignal, depth: number): Promise<number[]> {
     try {
-      return subwayRouteIds(parseOsmJson(await this.request(mapUrl(this.apiUrl, box), signal)))
+      return subwayRouteIds(parseOsmJson(await this.requestOrMirror(mapUrl(this.apiUrl, box), overpassMapQuery(box), signal)))
     } catch (error) {
       // 400 from the map call means the box holds too much data. Split it and ask for the parts.
       if (error instanceof OsmHttpError && error.status === 400 && depth < MAX_SPLIT_DEPTH) {
@@ -362,8 +390,30 @@ export class RouteLoader {
   }
 
   private async fetchRoute(id: number, signal: AbortSignal): Promise<RouteSource> {
-    const text = await this.request(relationFullUrl(this.apiUrl, id), signal)
+    const text = await this.requestOrMirror(relationFullUrl(this.apiUrl, id), overpassRelationQuery(id), signal)
     return relationRoute(parseOsmJson(text), id)
+  }
+
+  /** The OSM API first. If it cannot answer, the Overpass mirrors are tried in order. */
+  private async requestOrMirror(url: string, query: string, signal: AbortSignal): Promise<string> {
+    try {
+      return await this.request(url, signal)
+    } catch (error) {
+      if (signal.aborted || this.overpassUrls.length === 0 || !fallsBackToMirror(error)) throw error
+      return this.fromMirrors(query, signal, error)
+    }
+  }
+
+  /** Tries each mirror once per request. Mirror cooldowns do not pause the OSM API. Throws the OSM error if all fail. */
+  private async fromMirrors(query: string, signal: AbortSignal, osmError: unknown): Promise<string> {
+    for (const mirror of this.overpassUrls) {
+      try {
+        return await this.limited(signal, () => this.once(overpassUrl(mirror, query), signal, true))
+      } catch (error) {
+        if (signal.aborted) throw error
+      }
+    }
+    throw osmError
   }
 
   /** A GET with a timeout. Network errors and timeouts are retried; other HTTP errors are not. */
@@ -388,7 +438,7 @@ export class RouteLoader {
     }
   }
 
-  private async once(url: string, signal: AbortSignal): Promise<string> {
+  private async once(url: string, signal: AbortSignal, mirror = false): Promise<string> {
     // A plain GET with no custom headers, so the browser needs no CORS preflight.
     const controller = new AbortController()
     const cancel = () => controller.abort()
@@ -401,7 +451,7 @@ export class RouteLoader {
     try {
       const response = await this.fetchFn(url, { signal: controller.signal })
       if (!response.ok) {
-        if (COOLING_STATUS.has(response.status)) this.cool(retryAfterMs(response))
+        if (!mirror && COOLING_STATUS.has(response.status)) this.cool(retryAfterMs(response))
         throw new OsmHttpError(response.status)
       }
       return await response.text()

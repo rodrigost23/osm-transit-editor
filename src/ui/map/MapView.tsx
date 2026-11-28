@@ -100,6 +100,7 @@ export function MapView({ target, known, setKnown, selectedId, setSelectedId, se
       )
     }
     const loader = new RouteLoader(config.osmApiUrl, {
+      overpassUrls: config.overpassUrls,
       store: new LayeredStore(new MemoryStore(300), new IndexedDbStore()),
       onCooldown: (until) => setWaitSeconds(Math.ceil((until - Date.now()) / 1000)),
     })
