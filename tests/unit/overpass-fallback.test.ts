@@ -105,13 +105,13 @@ describe('mirror fallback', () => {
     expect(result.failures.length).toBeGreaterThan(0)
   })
 
-  it('asks the mirrors first, without the OSM API, when overpassFirst is set', async () => {
+  it('asks the mirrors first for IDs when overpassFirst is set', async () => {
     const net = network({})
     const result = await loader(net.fetchFn, [MIRROR_A]).load(BOX, new AbortController().signal, undefined, { overpassFirst: true })
     expect(result.routes.length).toBeGreaterThan(0)
-    expect(net.calls.some((url) => url.startsWith(API))).toBe(false)
-    // One query for the box, then one per route.
-    expect(net.calls.filter((url) => url.startsWith(MIRROR_A)).length).toBe(2)
+    // The IDs come from Overpass in one query. The route details come from the OSM API.
+    expect(net.calls.filter((url) => url.startsWith(MIRROR_A)).length).toBe(1)
+    expect(net.calls.some((url) => url.includes('/relation/7/full.json'))).toBe(true)
   })
 
   it('answers a second view of the same quarters from the store, without the box query', async () => {
