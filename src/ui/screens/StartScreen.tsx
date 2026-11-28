@@ -2,7 +2,7 @@ import { cn } from '@/lib/utils'
 import { useRef, useState, type FormEvent } from 'react'
 import { config } from '@/core/config'
 import { modeLabel, type RouteSource, type Stop } from '@/core/data/geojson'
-import { groupLines, lineColour, lineKey, lineVariants, routeCentre } from '@/core/data/lines'
+import { groupLines, lineColour, lineHeader, lineKey, lineVariants, routeCentre } from '@/core/data/lines'
 import { searchPlace } from '@/core/data/nominatim'
 import { describeError } from '@/core/data/route-loader'
 import { MapView, type MapTarget } from '@/ui/map/MapView'
@@ -25,7 +25,8 @@ export function StartScreen() {
   // The line under the pointer, on the map or in the list. Both highlight it.
   const [hoveredLine, setHoveredLine] = useState<string | null>(null)
   const [selectedStop, setSelectedStop] = useState<Stop | null>(null)
-  const lines = groupLines(visible)
+  // Each line is listed under its route_master's name and colour, or its own when it has none.
+  const lines = groupLines(visible).map((group) => [lineHeader(group[0]), ...group.slice(1)])
   const reloadRef = useRef<() => void>(() => {})
   const selectedRoute = known.find((route) => route.id === selectedId)
   const variants = selectedRoute ? lineVariants(known, selectedRoute.id) : []

@@ -1,4 +1,4 @@
-import { type RouteSource, type Stop } from './geojson'
+import { type RouteMaster, type RouteSource, type Stop } from './geojson'
 import { parseOsmJson, type OsmData, type OsmWay } from './osm-json'
 import { areaOf, cellOf, intersects, segmentIndex, tilesIn, type Cell, type Segment } from './coverage'
 import { type Entry, type Store, MemoryStore } from './store'
@@ -33,10 +33,12 @@ const MAX_COOLING_RETRIES = 2
 /** Saved routes and coverage may take this many bytes. The least recently used are removed beyond it. */
 export const DEFAULT_BUDGET_BYTES = 40 * 1024 * 1024
 // Format of the saved data. Version 1 (one entry per quarter of a tile) is read once, moved, and removed.
-const FORMAT = 'v2'
+// Version 3 stores the route_master of each route, so version 2 routes are fetched again.
+const FORMAT = 'v3'
 const INDEX_KEY = `index/${FORMAT}`
 const ROUTE_PREFIX = `route/${FORMAT}/`
 const CELL_PREFIX = `cell/${FORMAT}/`
+const MASTER_PREFIX = `master/${FORMAT}/`
 const LEGACY_ROUTE_PREFIX = 'route/v1/'
 const LEGACY_TILE_PREFIX = 'v1/'
 const TILE_ZOOM = 14
@@ -517,12 +519,41 @@ export class RouteLoader {
   }
 
   /** A route from the store when it is saved, otherwise from the network. Concurrent asks for one route share one request. */
-  private routeFor(index: Index, id: number, signal: AbortSignal, force: boolean, fetchRoute: (id: number, s: AbortSignal) => Promise<RouteSource>): Promise<RouteSource> {
+  private routeFor(index: Index, id: number, signal: AbortSignal, force: boolean, fetchRoute: FetchRoute): Promise<RouteSource> {
     const pending = this.inflight.get(id)
     if (pending) return pending
-    const task = this.resolveRoute(index, id, signal, force, fetchRoute).finally(() => this.inflight.delete(id))
+    const task = this.resolveRoute(index, id, signal, force, this.withMaster(fetchRoute)).finally(() => this.inflight.delete(id))
     this.inflight.set(id, task)
     return task
+  }
+
+  /** Fetches a route, then sets its route_master. A failed master lookup leaves the route without one, unchecked. */
+  private withMaster(fetchRoute: FetchRoute): FetchRoute {
+    return async (id, signal) => {
+      const route = await fetchRoute(id, signal)
+      const master = await this.masterOf(id, signal)
+      if (master !== undefined) route.master = master
+      return route
+    }
+  }
+
+  /**
+   * The route_master of a route: a master, null when the route has none, or undefined when the OSM API
+   * could not answer. Each answer is saved, null included, so a route is asked about once.
+   */
+  private async masterOf(id: number, signal: AbortSignal): Promise<RouteMaster | null | undefined> {
+    const key = masterKey(id)
+    const saved = await this.store.get(key).catch(() => undefined)
+    if (saved && isMasterEntry(saved.value)) return saved.value.master
+    try {
+      const text = await this.request(`${this.apiUrl}/api/0.6/relation/${id}/relations.json`, signal)
+      const master = routeMasterOf(parseOsmJson(text))
+      await this.store.set(key, { value: { master }, savedAt: this.now() }).catch(() => undefined)
+      return master
+    } catch (error) {
+      if (signal.aborted) throw error
+      return undefined
+    }
   }
 
   private async resolveRoute(
@@ -931,6 +962,26 @@ export class RouteLoader {
 
 function routeKey(id: number): string {
   return `${ROUTE_PREFIX}${id}`
+}
+
+function masterKey(id: number): string {
+  return `${MASTER_PREFIX}${id}`
+}
+
+type FetchRoute = (id: number, s: AbortSignal) => Promise<RouteSource>
+
+/** The route_master in the parent relations of a route, or null when there is none. Relations are read in id order. */
+export function routeMasterOf(data: OsmData): RouteMaster | null {
+  for (const [id, relation] of [...data.relations].sort(([a], [b]) => a - b)) {
+    if (relation.tags.type === 'route_master') return { id, tags: relation.tags }
+  }
+  return null
+}
+
+function isMasterEntry(value: unknown): value is { master: RouteMaster | null } {
+  if (typeof value !== 'object' || value === null || !('master' in value)) return false
+  const master = (value as { master: unknown }).master
+  return master === null || (typeof master === 'object' && master !== null)
 }
 
 function cellStoreKey(key: string): string {

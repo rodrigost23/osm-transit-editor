@@ -10,6 +10,12 @@ export interface Stop {
   lon: number
 }
 
+/** The OSM route_master relation a route belongs to: its id and all its tags. */
+export interface RouteMaster {
+  id: number
+  tags: Record<string, string>
+}
+
 /** A subway route, with its full line geometry as [lon, lat] pairs. */
 export interface RouteSource {
   id: number
@@ -19,6 +25,8 @@ export interface RouteSource {
   ways?: number[]
   /** Stations listed in the relation. Missing in data saved by older versions. */
   stops?: Stop[]
+  /** The route_master the route is a member of. Null when it has none (an orphan route). Missing when not checked. */
+  master?: RouteMaster | null
 }
 
 export interface PointFeature {
