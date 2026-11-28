@@ -170,6 +170,12 @@ export function overpassMapQuery(box: BoundingBox): string {
   return `[out:json][timeout:25];relation["route"="subway"](${bbox});out body;`
 }
 
+/** Overpass query for the IDs of the subway relations in a box. The details come from the OSM API. */
+export function overpassRouteIdsQuery(box: BoundingBox): string {
+  const bbox = [box.south, box.west, box.north, box.east].join(',')
+  return `[out:json][timeout:25];relation["route"="subway"](${bbox});out ids;`
+}
+
 /** Overpass query for one route relation with its ways and nodes. Same answer as the full call. */
 export function overpassRelationQuery(id: number): string {
   return `[out:json][timeout:25];relation(${id});(._;>;);out body;`
@@ -431,8 +437,8 @@ export class RouteLoader {
     }
     if (ids === undefined) {
       try {
-        const text = await this.fromMirrors(overpassMapQuery(box), signal, mirrorFailure)
-        ids = subwayRouteIds(parseOsmJson(text))
+        const text = await this.fromMirrors(overpassRouteIdsQuery(box), signal, mirrorFailure)
+        ids = routeIdsFrom(text)
       } catch (error) {
         if (signal.aborted) throw cancelled()
         failures.push({ kind: 'map', url: this.overpassUrls[0], reason: describeError(error) })
@@ -448,7 +454,8 @@ export class RouteLoader {
           routes.set(
             id,
             await this.remember(`route/${FORMAT_VERSION}/${id}`, signal, async (s) => {
-              const text = await this.fromMirrors(overpassRelationQuery(id), s, mirrorFailure)
+              // The details come from the OSM API, as on the OSM path. Only the IDs came from Overpass.
+              const text = await this.request(relationFullUrl(this.apiUrl, id), s)
               return relationRoute(parseOsmJson(text), id)
             }, { force: refresh, outdated: outdatedRoute }),
           )
@@ -610,6 +617,12 @@ function cancelled(): DOMException {
 
 function throwIfCancelled(signal: AbortSignal): void {
   if (signal.aborted) throw cancelled()
+}
+
+/** The relation IDs in an Overpass `out ids` answer. The query already keeps only subway routes. */
+function routeIdsFrom(text: string): number[] {
+  const data = JSON.parse(text) as { elements?: { type?: string; id?: number }[] }
+  return (data.elements ?? []).filter((element) => element.type === 'relation' && typeof element.id === 'number').map((element) => element.id as number)
 }
 
 /** True when a lies wholly inside b. */
