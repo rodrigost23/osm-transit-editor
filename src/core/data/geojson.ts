@@ -1,4 +1,5 @@
 import { resolveColour } from './colour'
+import { lineKey } from './lines'
 
 /** A station or platform of a route, as one point. */
 export interface Stop {
@@ -14,7 +15,9 @@ export interface RouteSource {
   id: number
   tags: Record<string, string>
   lines: [number, number][][]
-  /** Stations and platforms listed in the relation. Missing in data saved by older versions. */
+  /** The way of each line, in the same order as lines. Missing in data saved by older versions. */
+  ways?: number[]
+  /** Stations listed in the relation. Missing in data saved by older versions. */
   stops?: Stop[]
 }
 
@@ -107,19 +110,71 @@ function badgePoint(route: RouteSource): [number, number] | null {
   return longest[Math.floor(longest.length / 2)]
 }
 
-/** One round badge per route, carrying its ref, in the route's colour. */
+/** The routes of each line, in id order: one line per ref, network and operator. */
+function groupByLine(routes: readonly RouteSource[]): RouteSource[][] {
+  const groups = new Map<string, RouteSource[]>()
+  for (const route of [...routes].sort((a, b) => a.id - b.id)) {
+    const key = lineKey(route)
+    groups.set(key, [...(groups.get(key) ?? []), route])
+  }
+  return [...groups.values()]
+}
+
+/** One round badge per line, carrying its ref, in the line's colour. */
 export function badgesToGeoJSON(routes: readonly RouteSource[]): PointCollection {
   return {
     type: 'FeatureCollection',
-    features: routes.flatMap((route) => {
-      const point = badgePoint(route)
+    features: groupByLine(routes).flatMap((group) => {
+      const point = badgePoint({ id: 0, tags: {}, lines: group.flatMap((route) => route.lines) })
       if (!point) return []
-      const { colour } = resolveColour(route.tags.colour)
+      const { colour } = resolveColour(group[0].tags.colour)
       return [
         {
           type: 'Feature' as const,
           geometry: { type: 'Point' as const, coordinates: point },
-          properties: { ref: route.tags.ref ?? '', colour, textColour: contrastText(colour) },
+          properties: { ref: group[0].tags.ref ?? '', colour, textColour: contrastText(colour) },
+        },
+      ]
+    }),
+  }
+}
+
+/**
+ * One MultiLineString per line, for the zoomed-out view. A way shared by the two directions
+ * of a line is drawn once.
+ */
+export function linesToGeoJSON(routes: readonly RouteSource[]): RouteCollection {
+  return {
+    type: 'FeatureCollection',
+    features: groupByLine(routes).flatMap((group) => {
+      const seen = new Set<number>()
+      const coordinates: [number, number][][] = []
+      for (const route of group) {
+        route.lines.forEach((line, index) => {
+          const way = route.ways?.[index]
+          if (way !== undefined) {
+            if (seen.has(way)) return
+            seen.add(way)
+          }
+          coordinates.push(line)
+        })
+      }
+      if (coordinates.length === 0) return []
+      const first = group[0]
+      const { colour, valid } = resolveColour(first.tags.colour)
+      return [
+        {
+          type: 'Feature' as const,
+          id: first.id,
+          geometry: { type: 'MultiLineString' as const, coordinates },
+          properties: {
+            relationId: first.id,
+            ref: first.tags.ref ?? '',
+            name: first.tags.name ?? '',
+            operator: first.tags.operator ?? '',
+            colour,
+            colourValid: valid,
+          },
         },
       ]
     }),

@@ -5,6 +5,7 @@ import 'maplibre-gl/dist/maplibre-gl.css'
 import { config } from '@/core/config'
 import {
   badgesToGeoJSON,
+  linesToGeoJSON,
   RouteChangeTracker,
   stopsToGeoJSON,
   type PointCollection,
@@ -33,6 +34,9 @@ export interface MapTarget {
 
 const SOURCE_ID = 'transit-routes'
 const LAYER_ID = 'transit-routes-line'
+// Zoomed out, one line per route name, drawn from the visible zoom up to the zoom where routes take over.
+const OVERVIEW_SOURCE_ID = 'transit-overview'
+const OVERVIEW_LAYER_ID = 'transit-overview-line'
 const BADGE_SOURCE_ID = 'transit-badges'
 const BADGE_LAYER_ID = 'transit-badges-circle'
 const BADGE_TEXT_ID = 'transit-badges-ref'
@@ -95,9 +99,11 @@ export function MapView({ target, known, setKnown, selectedId, setSelectedId }: 
       if (!source) return
       const badges = map.getSource<maplibregl.GeoJSONSource>(BADGE_SOURCE_ID)
       const stops = map.getSource<maplibregl.GeoJSONSource>(STOP_SOURCE_ID)
+      const overview = map.getSource<maplibregl.GeoJSONSource>(OVERVIEW_SOURCE_ID)
       // Lines, badges and stations come from the same routes, so they are set together.
       const show = (routes: RouteSource[], next: RouteCollection) => {
         source.setData(next)
+        overview?.setData(linesToGeoJSON(routes))
         badges?.setData(badgesToGeoJSON(routes))
         stops?.setData(stopsToGeoJSON(routes))
       }
@@ -184,13 +190,23 @@ export function MapView({ target, known, setKnown, selectedId, setSelectedId }: 
 
     map.on('load', () => {
       map.addSource(SOURCE_ID, { type: 'geojson', data: emptyRoutes })
+      map.addSource(OVERVIEW_SOURCE_ID, { type: 'geojson', data: emptyRoutes })
+      map.addLayer({
+        id: OVERVIEW_LAYER_ID,
+        type: 'line',
+        source: OVERVIEW_SOURCE_ID,
+        minzoom: config.lineVisibleZoom,
+        maxzoom: config.minLineZoom,
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: { 'line-color': ['get', 'colour'], 'line-width': 3 },
+      })
       map.addSource(BADGE_SOURCE_ID, { type: 'geojson', data: emptyPoints })
       map.addSource(STOP_SOURCE_ID, { type: 'geojson', data: emptyPoints })
       map.addLayer({
         id: LAYER_ID,
         type: 'line',
         source: SOURCE_ID,
-        minzoom: config.lineVisibleZoom,
+        minzoom: config.minLineZoom,
         layout: { 'line-cap': 'round', 'line-join': 'round' },
         paint: { 'line-color': ['get', 'colour'], 'line-width': 4 },
       })
@@ -199,9 +215,10 @@ export function MapView({ target, known, setKnown, selectedId, setSelectedId }: 
         id: STOP_LAYER_ID,
         type: 'circle',
         source: STOP_SOURCE_ID,
-        minzoom: STOP_MIN_ZOOM,
+        // Dots show from the visible zoom on, names from STOP_MIN_ZOOM.
+        minzoom: config.lineVisibleZoom,
         paint: {
-          'circle-radius': 4,
+          'circle-radius': ['interpolate', ['linear'], ['zoom'], config.lineVisibleZoom, 2, STOP_MIN_ZOOM, 4],
           'circle-color': '#ffffff',
           'circle-stroke-color': ['get', 'colour'],
           'circle-stroke-width': 2,

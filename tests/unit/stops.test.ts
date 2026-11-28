@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { badgesToGeoJSON, contrastText, stopsToGeoJSON, type RouteSource } from '@/core/data/geojson'
+import { badgesToGeoJSON, contrastText, linesToGeoJSON, stopsToGeoJSON, type RouteSource } from '@/core/data/geojson'
 import { parseOsmJson } from '@/core/data/osm-json'
 import { relationRoute } from '@/core/data/route-loader'
 
@@ -97,5 +97,37 @@ describe('contrastText', () => {
     expect(contrastText('#1e3a8a')).toBe('#ffffff')
     expect(contrastText('#fff')).toBe('#000000')
     expect(contrastText('#000')).toBe('#ffffff')
+  })
+})
+
+describe('linesToGeoJSON', () => {
+  it('draws one feature per line, and a way shared by both directions only once', () => {
+    const forward: RouteSource = {
+      id: 5,
+      tags: { ref: '1', network: 'Metrô', operator: 'Metrô Rio', colour: '#f58220' },
+      lines: [[[0, 0], [1, 1]], [[1, 1], [2, 2]]],
+      ways: [100, 101],
+    }
+    const backward: RouteSource = {
+      id: 6,
+      tags: { ref: '1', network: 'Metrô', operator: 'Metrô Rio', colour: '#f58220' },
+      lines: [[[1, 1], [2, 2]], [[2, 2], [3, 3]]],
+      ways: [101, 102],
+    }
+    const other: RouteSource = { id: 9, tags: { ref: '2' }, lines: [[[5, 5], [6, 6]]], ways: [200] }
+    const collection = linesToGeoJSON([backward, forward, other])
+    expect(collection.features).toHaveLength(2)
+    expect(collection.features[0].id).toBe(5)
+    expect(collection.features[0].geometry.coordinates).toEqual([
+      [[0, 0], [1, 1]],
+      [[1, 1], [2, 2]],
+      [[2, 2], [3, 3]],
+    ])
+    expect(collection.features[0].properties.colour).toBe('#f58220')
+  })
+
+  it('draws every line of routes saved without way ids', () => {
+    const route: RouteSource = { id: 1, tags: {}, lines: [[[0, 0], [1, 1]]] }
+    expect(linesToGeoJSON([route, { ...route, id: 2 }]).features[0].geometry.coordinates).toHaveLength(2)
   })
 })

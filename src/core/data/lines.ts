@@ -22,7 +22,7 @@ export function lineVariants(routes: readonly RouteSource[], id: number): RouteS
   return routes.filter((route) => lineKey(route) === key).sort((a, b) => a.id - b.id)
 }
 
-function lineKey(route: RouteSource): string {
+export function lineKey(route: RouteSource): string {
   return [route.tags.ref, route.tags.network, route.tags.operator].map((value) => value ?? '').join('|')
 }
 

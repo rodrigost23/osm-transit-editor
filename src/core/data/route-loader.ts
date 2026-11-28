@@ -124,6 +124,8 @@ export function relationRoute(data: OsmData, id: number): RouteSource {
   const relation = data.relations.get(id)
   if (!relation) throw new Error(`Relation ${id} is missing from the response`)
   const lines: [number, number][][] = []
+  // The way each line comes from, in the same order, so routes of one line can share a way.
+  const ways: number[] = []
   const stops: Stop[] = []
   for (const member of relation.members) {
     if (member.type === 'node' && STOP_ROLES.has(member.role)) {
@@ -141,9 +143,12 @@ export function relationRoute(data: OsmData, id: number): RouteSource {
       const node = data.nodes.get(ref)
       if (node) line.push([node.lon, node.lat])
     }
-    if (line.length > 1) lines.push(line)
+    if (line.length > 1) {
+      lines.push(line)
+      ways.push(member.ref)
+    }
   }
-  return { id, tags: relation.tags, lines, stops }
+  return { id, tags: relation.tags, lines, ways, stops }
 }
 
 export function mapUrl(apiUrl: string, box: BoundingBox): string {
@@ -174,9 +179,9 @@ export interface LoadOptions {
   refresh?: boolean
 }
 
-/** A saved route from before stations were kept has no stops. It is refreshed once, so its stations appear. */
+/** A saved route from before stations and way ids were kept. It is refreshed once, so both appear. */
 function outdatedRoute(value: unknown): boolean {
-  return !('stops' in (value as object))
+  return !('stops' in (value as object)) || !('ways' in (value as object))
 }
 
 /**
