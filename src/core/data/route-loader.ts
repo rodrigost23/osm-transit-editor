@@ -1,4 +1,4 @@
-import { type RouteSource } from './geojson'
+import { type RouteSource, type Stop } from './geojson'
 import { parseOsmJson, type OsmData, type OsmWay } from './osm-json'
 import { type Entry, type Store, MemoryStore } from './store'
 import { splitBox, tileBox, tilesCovering, type BoundingBox, type Tile } from './tiles'
@@ -20,7 +20,7 @@ const MAX_SPLIT_DEPTH = 4
 // Saved data younger than this is used as is. Older data is shown at once and refreshed in the background.
 const FRESH_MS = 24 * 60 * 60 * 1000
 // Part of every cache key. Change it when the saved shape changes.
-const FORMAT_VERSION = 'v1'
+const FORMAT_VERSION = 'v2'
 
 export class OsmHttpError extends Error {
   readonly status: number
@@ -83,15 +83,45 @@ function isTrack(way: OsmWay): boolean {
   return railway !== 'platform' && publicTransport !== 'platform' && highway !== 'platform' && area !== 'yes'
 }
 
-/** Builds a route from a relation's track ways. Ways outside the requested area are included. */
+const STOP_ROLES = new Set(['stop', 'stop_entry_only', 'stop_exit_only', 'platform', 'platform_entry_only', 'platform_exit_only'])
+
+/** The position of a way's middle, as the mean of its nodes; null when none of them is known. */
+function wayCentre(data: OsmData, way: OsmWay): { lat: number; lon: number } | null {
+  const points = way.nodes.flatMap((ref) => {
+    const node = data.nodes.get(ref)
+    return node ? [node] : []
+  })
+  if (points.length === 0) return null
+  return {
+    lat: points.reduce((sum, node) => sum + node.lat, 0) / points.length,
+    lon: points.reduce((sum, node) => sum + node.lon, 0) / points.length,
+  }
+}
+
+/** Builds a route from a relation's track ways and its stop and platform members. Ways outside the requested area are included. */
 export function relationRoute(data: OsmData, id: number): RouteSource {
   const relation = data.relations.get(id)
   if (!relation) throw new Error(`Relation ${id} is missing from the response`)
   const lines: [number, number][][] = []
+  const stops: Stop[] = []
   for (const member of relation.members) {
-    if (member.type !== 'way' || !TRACK_ROLES.has(member.role)) continue
+    if (!STOP_ROLES.has(member.role) && !TRACK_ROLES.has(member.role)) continue
+    if (member.type === 'node' && STOP_ROLES.has(member.role)) {
+      const node = data.nodes.get(member.ref)
+      if (node && Number.isFinite(node.lat) && Number.isFinite(node.lon)) {
+        stops.push({ key: `n${member.ref}`, name: node.tags?.name ?? '', lat: node.lat, lon: node.lon })
+      }
+      continue
+    }
+    if (member.type !== 'way') continue
     const way = data.ways.get(member.ref)
-    if (!way || !isTrack(way)) continue
+    if (!way) continue
+    if (STOP_ROLES.has(member.role)) {
+      const centre = wayCentre(data, way)
+      if (centre) stops.push({ key: `w${member.ref}`, name: way.tags.name ?? '', ...centre })
+      continue
+    }
+    if (!TRACK_ROLES.has(member.role) || !isTrack(way)) continue
     const line: [number, number][] = []
     for (const ref of way.nodes) {
       const node = data.nodes.get(ref)
@@ -99,7 +129,7 @@ export function relationRoute(data: OsmData, id: number): RouteSource {
     }
     if (line.length > 1) lines.push(line)
   }
-  return { id, tags: relation.tags, lines }
+  return { id, tags: relation.tags, lines, stops }
 }
 
 export function mapUrl(apiUrl: string, box: BoundingBox): string {

@@ -3,6 +3,7 @@
 export interface OsmNode {
   lat: number
   lon: number
+  tags?: Record<string, string>
 }
 
 export interface OsmWay {
@@ -44,7 +45,7 @@ export function parseOsmJson(text: string): OsmData {
   for (const element of json.elements) {
     if (element.id === undefined) continue
     if (element.type === 'node') {
-      data.nodes.set(element.id, { lat: element.lat ?? NaN, lon: element.lon ?? NaN })
+      data.nodes.set(element.id, { lat: element.lat ?? NaN, lon: element.lon ?? NaN, tags: element.tags ?? {} })
     } else if (element.type === 'way') {
       data.ways.set(element.id, { nodes: element.nodes ?? [], tags: element.tags ?? {} })
     } else if (element.type === 'relation') {

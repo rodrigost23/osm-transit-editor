@@ -3,7 +3,14 @@ import * as maplibregl from 'maplibre-gl'
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { config } from '@/core/config'
-import { RouteChangeTracker, type RouteCollection, type RouteSource } from '@/core/data/geojson'
+import {
+  badgesToGeoJSON,
+  RouteChangeTracker,
+  stopsToGeoJSON,
+  type PointCollection,
+  type RouteCollection,
+  type RouteSource,
+} from '@/core/data/geojson'
 import { IndexedDbStore } from '@/core/data/idb-store'
 import { lineVariants } from '@/core/data/lines'
 import { describeError, RouteLoader } from '@/core/data/route-loader'
@@ -26,12 +33,20 @@ export interface MapTarget {
 
 const SOURCE_ID = 'transit-routes'
 const LAYER_ID = 'transit-routes-line'
-const LABEL_ID = 'transit-routes-label'
-// Refs are too crowded to read below this zoom.
-const LABEL_MIN_ZOOM = 12
+const BADGE_SOURCE_ID = 'transit-badges'
+const BADGE_LAYER_ID = 'transit-badges-circle'
+const BADGE_TEXT_ID = 'transit-badges-ref'
+const STOP_SOURCE_ID = 'transit-stops'
+const STOP_LAYER_ID = 'transit-stops-circle'
+const STOP_LABEL_ID = 'transit-stops-name'
+// Badges are too crowded to read below this zoom.
+const BADGE_MIN_ZOOM = 12
+// Stations are drawn, and named, from this zoom on.
+const STOP_MIN_ZOOM = 14
 // Wait for the map to settle before querying, so a fast pan or zoom sends one request.
 const MOVE_DEBOUNCE_MS = 400
 const emptyRoutes: RouteCollection = { type: 'FeatureCollection', features: [] }
+const emptyPoints: PointCollection = { type: 'FeatureCollection', features: [] }
 
 interface MapViewProps {
   target?: MapTarget
@@ -74,11 +89,20 @@ export function MapView({ target, known, setKnown, selectedId, setSelectedId }: 
     const loadLines = async () => {
       const source = map.getSource<maplibregl.GeoJSONSource>(SOURCE_ID)
       if (!source) return
+      const badges = map.getSource<maplibregl.GeoJSONSource>(BADGE_SOURCE_ID)
+      const stops = map.getSource<maplibregl.GeoJSONSource>(STOP_SOURCE_ID)
+      // Lines, badges and stations come from the same routes, so they are set together.
+      const show = (routes: RouteSource[], next: RouteCollection) => {
+        source.setData(next)
+        badges?.setData(badgesToGeoJSON(routes))
+        stops?.setData(stopsToGeoJSON(routes))
+      }
       controller?.abort()
       if (map.getZoom() < config.minLineZoom) {
         // Zoomed out, nothing is requested. Lines loaded so far stay on the map.
-        const next = drawn.next([...seen.values()])
-        if (next) source.setData(next)
+        const routes = [...seen.values()]
+        const next = drawn.next(routes)
+        if (next) show(routes, next)
         setZoomedOut(map.getZoom() < config.lineVisibleZoom)
         setLoading(false)
         setLoadError(null)
@@ -96,7 +120,7 @@ export function MapView({ target, known, setKnown, selectedId, setSelectedId }: 
           for (const route of routes) seen.set(route.id, route)
           setKnown([...seen.values()])
           const next = drawn.next(routes)
-          if (next) source.setData(next)
+          if (next) show(routes, next)
         }
         const result = await loader.load(
           { south: bounds.getSouth(), west: bounds.getWest(), north: bounds.getNorth(), east: bounds.getEast() },
@@ -134,6 +158,8 @@ export function MapView({ target, known, setKnown, selectedId, setSelectedId }: 
 
     map.on('load', () => {
       map.addSource(SOURCE_ID, { type: 'geojson', data: emptyRoutes })
+      map.addSource(BADGE_SOURCE_ID, { type: 'geojson', data: emptyPoints })
+      map.addSource(STOP_SOURCE_ID, { type: 'geojson', data: emptyPoints })
       map.addLayer({
         id: LAYER_ID,
         type: 'line',
@@ -142,14 +168,42 @@ export function MapView({ target, known, setKnown, selectedId, setSelectedId }: 
         layout: { 'line-cap': 'round', 'line-join': 'round' },
         paint: { 'line-color': ['get', 'colour'], 'line-width': 4 },
       })
-      // The ref is drawn along each line, in the line's colour as a halo.
+      // Stations sit under the badges, and are named from STOP_MIN_ZOOM on.
       map.addLayer({
-        id: LABEL_ID,
+        id: STOP_LAYER_ID,
+        type: 'circle',
+        source: STOP_SOURCE_ID,
+        minzoom: STOP_MIN_ZOOM,
+        paint: {
+          'circle-radius': 4,
+          'circle-color': '#ffffff',
+          'circle-stroke-color': ['get', 'colour'],
+          'circle-stroke-width': 2,
+        },
+      })
+      map.addLayer({
+        id: STOP_LABEL_ID,
         type: 'symbol',
-        source: SOURCE_ID,
-        minzoom: LABEL_MIN_ZOOM,
-        layout: { 'symbol-placement': 'line', 'text-field': ['get', 'ref'], 'text-font': ['Noto Sans Regular'], 'text-size': 12 },
-        paint: { 'text-color': '#ffffff', 'text-halo-color': ['get', 'colour'], 'text-halo-width': 2 },
+        source: STOP_SOURCE_ID,
+        minzoom: STOP_MIN_ZOOM,
+        layout: { 'text-field': ['get', 'name'], 'text-font': ['Noto Sans Regular'], 'text-size': 11, 'text-offset': [0, 0.9], 'text-anchor': 'top' },
+        paint: { 'text-color': '#1d1d1f', 'text-halo-color': '#ffffff', 'text-halo-width': 1.5 },
+      })
+      // One round badge per line, carrying its ref in the line's colour, on the middle of its track.
+      map.addLayer({
+        id: BADGE_LAYER_ID,
+        type: 'circle',
+        source: BADGE_SOURCE_ID,
+        minzoom: BADGE_MIN_ZOOM,
+        paint: { 'circle-radius': 10, 'circle-color': ['get', 'colour'], 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 1.5 },
+      })
+      map.addLayer({
+        id: BADGE_TEXT_ID,
+        type: 'symbol',
+        source: BADGE_SOURCE_ID,
+        minzoom: BADGE_MIN_ZOOM,
+        layout: { 'text-field': ['get', 'ref'], 'text-font': ['Noto Sans Regular'], 'text-size': 11, 'text-allow-overlap': true },
+        paint: { 'text-color': ['get', 'textColour'] },
       })
       map.on('click', LAYER_ID, (event) => {
         const id = Number(event.features?.[0]?.properties?.relationId)

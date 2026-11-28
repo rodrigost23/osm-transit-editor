@@ -24,7 +24,7 @@ describe('parseOsmJson', () => {
   const data = parseOsmJson(SAMPLE)
 
   it('reads nodes, ways and relations by id', () => {
-    expect(data.nodes.get(1)).toEqual({ lat: -22.9, lon: -43.19 })
+    expect(data.nodes.get(1)).toEqual({ lat: -22.9, lon: -43.19, tags: {} })
     expect(data.ways.get(10)).toEqual({ nodes: [1, 2], tags: { highway: 'service' } })
     expect(data.relations.get(7)).toEqual({
       tags: { route: 'subway', name: 'Metrô Linha 1' },
@@ -38,7 +38,7 @@ describe('parseOsmJson', () => {
   it('leaves out elements without an id and nodes without tags', () => {
     expect(data.relations.size).toBe(1)
     expect(data.ways.size).toBe(1)
-    expect(data.nodes.get(2)).toEqual({ lat: -22.91, lon: -43.18 })
+    expect(data.nodes.get(2)).toEqual({ lat: -22.91, lon: -43.18, tags: { railway: 'station' } })
   })
 
   it('rejects a response without an elements list', () => {

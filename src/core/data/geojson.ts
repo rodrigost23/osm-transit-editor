@@ -1,10 +1,32 @@
 import { resolveColour } from './colour'
 
+/** A station or platform of a route, as one point. */
+export interface Stop {
+  /** Same key for the same stop on every route that serves it: "n" + node id, or "w" + way id. */
+  key: string
+  name: string
+  lat: number
+  lon: number
+}
+
 /** A subway route, with its full line geometry as [lon, lat] pairs. */
 export interface RouteSource {
   id: number
   tags: Record<string, string>
   lines: [number, number][][]
+  /** Stations and platforms listed in the relation. Missing in data saved by older versions. */
+  stops?: Stop[]
+}
+
+export interface PointFeature {
+  type: 'Feature'
+  geometry: { type: 'Point'; coordinates: [number, number] }
+  properties: Record<string, string>
+}
+
+export interface PointCollection {
+  type: 'FeatureCollection'
+  features: PointFeature[]
 }
 
 export interface RouteProperties {
@@ -43,6 +65,60 @@ export class RouteChangeTracker {
 
   reset(): void {
     this.lastKey = undefined
+  }
+}
+
+/** One point per station, shared stations drawn once, in the colour of the first route (by id) that serves them. */
+export function stopsToGeoJSON(routes: readonly RouteSource[]): PointCollection {
+  const seen = new Set<string>()
+  const features: PointFeature[] = []
+  for (const route of [...routes].sort((a, b) => a.id - b.id)) {
+    const { colour } = resolveColour(route.tags.colour)
+    for (const stop of route.stops ?? []) {
+      if (seen.has(stop.key)) continue
+      seen.add(stop.key)
+      features.push({
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: [stop.lon, stop.lat] },
+        properties: { name: stop.name, colour },
+      })
+    }
+  }
+  return { type: 'FeatureCollection', features }
+}
+
+/** Black or white, whichever reads better on a hex colour from resolveColour. */
+export function contrastText(colour: string): '#000000' | '#ffffff' {
+  const hex = colour.slice(1)
+  const full = hex.length === 3 ? [...hex].map((digit) => digit + digit).join('') : hex
+  const [r, g, b] = [0, 2, 4].map((at) => parseInt(full.slice(at, at + 2), 16))
+  return (0.299 * r + 0.587 * g + 0.114 * b) / 255 > 0.6 ? '#000000' : '#ffffff'
+}
+
+/** The middle vertex of the longest line of a route, where its badge is drawn. */
+function badgePoint(route: RouteSource): [number, number] | null {
+  let longest: [number, number][] | undefined
+  for (const line of route.lines) if (!longest || line.length > longest.length) longest = line
+  if (!longest || longest.length === 0) return null
+  return longest[Math.floor(longest.length / 2)]
+}
+
+/** One round badge per route, carrying its ref, in the route's colour. */
+export function badgesToGeoJSON(routes: readonly RouteSource[]): PointCollection {
+  return {
+    type: 'FeatureCollection',
+    features: routes.flatMap((route) => {
+      const point = badgePoint(route)
+      if (!point) return []
+      const { colour } = resolveColour(route.tags.colour)
+      return [
+        {
+          type: 'Feature' as const,
+          geometry: { type: 'Point' as const, coordinates: point },
+          properties: { ref: route.tags.ref ?? '', colour, textColour: contrastText(colour) },
+        },
+      ]
+    }),
   }
 }
 
