@@ -3,8 +3,10 @@ import * as maplibregl from 'maplibre-gl'
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { config } from '@/core/config'
-import { routesToGeoJSON, type RouteCollection } from '@/core/data/geojson'
+import { routesToGeoJSON, type RouteCollection, type RouteSource } from '@/core/data/geojson'
+import { IndexedDbStore } from '@/core/data/idb-store'
 import { describeError, RouteLoader } from '@/core/data/route-loader'
+import { LayeredStore, MemoryStore } from '@/core/data/store'
 import { formatHash, parseHash } from '@/core/map/position'
 import { baseStyleUrl } from './base-style'
 
@@ -38,7 +40,9 @@ export function MapView() {
 
     // Each new view cancels the request still in flight, so only the latest view can update the map.
     let controller: AbortController | undefined
-    const loader = new RouteLoader(config.osmApiUrl)
+    const loader = new RouteLoader(config.osmApiUrl, {
+      store: new LayeredStore(new MemoryStore(300), new IndexedDbStore()),
+    })
     let debounce: ReturnType<typeof setTimeout> | undefined
     const loadLines = async () => {
       const source = map.getSource<maplibregl.GeoJSONSource>(SOURCE_ID)
@@ -57,27 +61,23 @@ export function MapView() {
       const bounds = map.getBounds()
       setLoading(true)
       try {
+        // Routes are drawn as parts of the view arrive, and again when all of it has.
+        const draw = (routes: RouteSource[]) => source.setData(routesToGeoJSON(routes))
         const result = await loader.load(
           { south: bounds.getSouth(), west: bounds.getWest(), north: bounds.getNorth(), east: bounds.getEast() },
           current.signal,
+          (partial) => draw(partial.routes),
         )
-        // Null means the view covers too many tiles to load at once.
-        if (result === null) {
-          source.setData(emptyRoutes)
-          setZoomedOut(true)
-          setLoadError(null)
+        // Routes that did load stay drawn even when some requests failed.
+        draw(result.routes)
+        if (result.failures.length > 0) {
+          console.error('Some subway route requests failed:', result.failures)
+          const first = result.failures[0]
+          setLoadError(
+            `${result.failures.length} of the requests for this view failed (${first.reason}, ${first.kind} ${first.url}). Routes that loaded are shown.`,
+          )
         } else {
-          // Routes that did load are drawn even when some requests failed.
-          source.setData(routesToGeoJSON(result.routes))
-          if (result.failures.length > 0) {
-            console.error('Some subway route requests failed:', result.failures)
-            const first = result.failures[0]
-            setLoadError(
-              `${result.failures.length} of the requests for this view failed (${first.reason}, ${first.kind} ${first.url}). Routes that loaded are shown.`,
-            )
-          } else {
-            setLoadError(null)
-          }
+          setLoadError(null)
         }
         setLoading(false)
       } catch (error) {

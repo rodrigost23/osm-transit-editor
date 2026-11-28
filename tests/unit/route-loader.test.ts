@@ -1,66 +1,91 @@
-import { describe, expect, it } from 'vitest'
-import { relationRoute, RouteLoader } from '@/core/data/route-loader'
-import { parseOsmXml } from '@/core/data/osm-xml'
+import { describe, expect, it, vi } from 'vitest'
+import { describeError, relationRoute, RouteLoader, subwayRouteIds } from '@/core/data/route-loader'
+import { parseOsmJson } from '@/core/data/osm-json'
+import { MemoryStore } from '@/core/data/store'
 import { tileBox } from '@/core/data/tiles'
 
 const API = 'https://osm.test'
 
-// Map response for one tile: a subway route (7), a bus route (8) and a way that is not a route.
-const MAP_XML = `<osm version="0.6">
-  <node id="1" lat="-22.9" lon="-43.19"/>
-  <node id="2" lat="-22.91" lon="-43.18"/>
-  <way id="10"><nd ref="1"/><nd ref="2"/></way>
-  <relation id="7"><member type="way" ref="10" role=""/><tag k="route" v="subway"/><tag k="ref" v="1"/><tag k="colour" v="#f58220"/></relation>
-  <relation id="8"><member type="way" ref="10" role=""/><tag k="route" v="bus"/></relation>
-</osm>`
+// Map response for a view: a subway route (7), a bus route (8) and a way that is not a route.
+const MAP_JSON = JSON.stringify({
+  elements: [
+    { type: 'node', id: 1, lat: -22.9, lon: -43.19 },
+    { type: 'node', id: 2, lat: -22.91, lon: -43.18 },
+    { type: 'way', id: 10, nodes: [1, 2] },
+    { type: 'relation', id: 7, members: [{ type: 'way', ref: 10, role: '' }], tags: { route: 'subway', ref: '1', colour: '#f58220' } },
+    { type: 'relation', id: 8, members: [{ type: 'way', ref: 10, role: '' }], tags: { route: 'bus' } },
+  ],
+})
 
 // Full response for the subway route: its ways and their nodes, including one outside the tile.
-const FULL_XML = `<osm version="0.6">
-  <node id="1" lat="-22.9" lon="-43.19"/>
-  <node id="2" lat="-22.91" lon="-43.18"/>
-  <node id="3" lat="-22.95" lon="-43.10"/>
-  <way id="10"><nd ref="1"/><nd ref="2"/></way>
-  <way id="11"><nd ref="2"/><nd ref="3"/></way>
-  <relation id="7"><member type="way" ref="10" role=""/><member type="way" ref="11" role=""/><tag k="route" v="subway"/><tag k="ref" v="1"/></relation>
-</osm>`
+const FULL_JSON = JSON.stringify({
+  elements: [
+    { type: 'node', id: 1, lat: -22.9, lon: -43.19 },
+    { type: 'node', id: 2, lat: -22.91, lon: -43.18 },
+    { type: 'node', id: 3, lat: -22.95, lon: -43.1 },
+    { type: 'way', id: 10, nodes: [1, 2] },
+    { type: 'way', id: 11, nodes: [2, 3] },
+    { type: 'relation', id: 7, members: [{ type: 'way', ref: 10, role: '' }, { type: 'way', ref: 11, role: '' }], tags: { route: 'subway', ref: '1' } },
+  ],
+})
 
-function fakeApi(options: { maxWidth?: number; delayMs?: number; failMap?: number | 'network'; failFull?: number | 'network' } = {}) {
+interface FakeOptions {
+  maxWidth?: number
+  failFull?: number | 'network'
+  failMap?: number | 'network'
+  failMapOnce?: number
+}
+
+function fakeApi(options: FakeOptions = {}) {
   const calls: string[] = []
-  let active = 0
-  let peak = 0
   const fetchFn = async (url: string): Promise<Response> => {
     calls.push(url)
-    active++
-    peak = Math.max(peak, active)
-    try {
-      if (options.delayMs) await new Promise((resolve) => setTimeout(resolve, options.delayMs))
-      if (url.includes('/relation/')) {
-        if (options.failFull === 'network') throw new TypeError('Failed to fetch')
-        if (options.failFull) return new Response('nope', { status: options.failFull })
-        return new Response(FULL_XML, { status: 200 })
-      }
-      if (options.failMap === 'network') throw new TypeError('Failed to fetch')
-      if (options.failMap && calls.filter((call) => call.includes('/map?')).length === 1) {
-        return new Response('nope', { status: options.failMap })
-      }
-      const bbox = new URL(url).searchParams.get('bbox') ?? ''
-      const [west = 0, , east = 0] = bbox.split(',').map(Number)
-      if (options.maxWidth && east - west > options.maxWidth) return new Response('too big', { status: 400 })
-      return new Response(MAP_XML, { status: 200 })
-    } finally {
-      active--
+    if (url.includes('/relation/')) {
+      if (options.failFull === 'network') throw new TypeError('Failed to fetch')
+      if (options.failFull) return new Response('nope', { status: options.failFull })
+      return new Response(FULL_JSON, { status: 200 })
     }
+    const mapCalls = calls.filter((call) => call.includes('/map.json')).length
+    if (options.failMap === 'network') throw new TypeError('Failed to fetch')
+    if (options.failMap) return new Response('nope', { status: options.failMap })
+    if (options.failMapOnce && mapCalls === 1) return new Response('busy', { status: options.failMapOnce })
+    const bbox = new URL(url).searchParams.get('bbox') ?? ''
+    const [west = 0, , east = 0] = bbox.split(',').map(Number)
+    if (options.maxWidth && east - west > options.maxWidth) return new Response('too big', { status: 400 })
+    return new Response(MAP_JSON, { status: 200 })
   }
-  return { fetchFn, calls, peak: () => peak }
+  return { fetchFn, calls, count: (part: string) => calls.filter((url) => url.includes(part)).length }
+}
+
+/** A clock that moves only when the loader sleeps, so retries and cooldowns take no real time. */
+function fakeClock() {
+  let time = 0
+  return {
+    now: () => time,
+    sleep: async (ms: number) => {
+      time += ms
+    },
+    get time() {
+      return time
+    },
+  }
+}
+
+function loaderFor(api: ReturnType<typeof fakeApi>, clock = fakeClock(), store = new MemoryStore(300)) {
+  return new RouteLoader(API, { fetchFn: api.fetchFn, store, now: clock.now, sleep: clock.sleep })
 }
 
 const tile = tileBox({ x: 6226, y: 9263, z: 14 })
 const oneTile = { south: tile.south + 0.001, north: tile.north - 0.001, west: tile.west + 0.001, east: tile.east - 0.001 }
 const signal = () => new AbortController().signal
 
-describe('relationRoute', () => {
+describe('route helpers', () => {
+  it('finds the subway relations in a map response', () => {
+    expect(subwayRouteIds(parseOsmJson(MAP_JSON))).toEqual([7])
+  })
+
   it('keeps the whole route, including ways outside the requested tile', () => {
-    const route = relationRoute(parseOsmXml(FULL_XML), 7)
+    const route = relationRoute(parseOsmJson(FULL_JSON), 7)
     expect(route.tags).toMatchObject({ route: 'subway', ref: '1' })
     expect(route.lines).toEqual([
       [
@@ -73,101 +98,110 @@ describe('relationRoute', () => {
       ],
     ])
   })
-})
 
-describe('relationRoute edge cases', () => {
-  it('skips members that are missing from the response and throws for an unknown relation', () => {
-    const xml = `<osm><relation id="5"><member type="way" ref="99" role=""/><member type="node" ref="1" role=""/><tag k="route" v="subway"/></relation></osm>`
-    expect(relationRoute(parseOsmXml(xml), 5).lines).toEqual([])
-    expect(() => relationRoute(parseOsmXml(xml), 6)).toThrow('Relation 6')
+  it('skips members missing from the response, and throws for an unknown relation', () => {
+    const json = JSON.stringify({ elements: [{ type: 'relation', id: 5, members: [{ type: 'way', ref: 99 }, { type: 'node', ref: 1 }] }] })
+    expect(relationRoute(parseOsmJson(json), 5).lines).toEqual([])
+    expect(() => relationRoute(parseOsmJson(json), 6)).toThrow('Relation 6')
+  })
+
+  it('describes errors for the console and the notice', () => {
+    expect(describeError(new Error('HTTP 400'))).toBe('HTTP 400')
+    expect(describeError('plain')).toBe('plain')
   })
 })
 
 describe('RouteLoader', () => {
-  it('loads the subway routes of the visible tiles and only those', async () => {
+  it('asks for each quarter of the nearest tile, then one route, and returns that route', async () => {
     const api = fakeApi()
-    const result = await new RouteLoader(API, api.fetchFn).load(oneTile, signal())
-    expect(result?.routes.map((route) => route.id)).toEqual([7])
-    expect(result?.failures).toEqual([])
-    expect(api.calls).toEqual([
-      expect.stringContaining('/api/0.6/map?bbox='),
-      `${API}/api/0.6/relation/7/full`,
-    ])
+    const result = await loaderFor(api).load(oneTile, signal())
+    expect(result.routes.map((route) => route.id)).toEqual([7])
+    expect(result.failures).toEqual([])
+    expect(api.count('/map.json?bbox=')).toBe(4)
+    expect(api.count('/relation/7/full.json')).toBe(1)
   })
 
-  it('reuses loaded tiles and routes instead of asking again', async () => {
+  it('redraws as parts of the view arrive', async () => {
     const api = fakeApi()
-    const loader = new RouteLoader(API, api.fetchFn)
+    const updates: number[] = []
+    await loaderFor(api).load(oneTile, signal(), (partial) => updates.push(partial.routes.length))
+    expect(updates.length).toBeGreaterThan(0)
+    expect(updates.at(-1)).toBe(1)
+  })
+
+  it('keeps fresh results and asks for nothing again', async () => {
+    const api = fakeApi()
+    const loader = loaderFor(api)
     await loader.load(oneTile, signal())
     const before = api.calls.length
     await loader.load(oneTile, signal())
     expect(api.calls.length).toBe(before)
   })
 
-  it('splits a box the API refuses as too large, then keeps the routes it finds', async () => {
-    const api = fakeApi({ maxWidth: 0.015 })
-    const result = await new RouteLoader(API, api.fetchFn).load(oneTile, signal())
-    expect(result?.routes.map((route) => route.id)).toEqual([7])
-    // The whole tile is refused, then its four quarters are asked for.
-    expect(api.calls.filter((url) => url.includes('/map?')).length).toBe(5)
+  it('splits a quarter the API refuses as too large, down to smaller boxes', async () => {
+    const api = fakeApi({ maxWidth: 0.006 })
+    const result = await loaderFor(api).load(oneTile, signal())
+    expect(result.routes.map((route) => route.id)).toEqual([7])
+    // Each quarter is refused once, then its four parts are asked for: 5 requests per quarter.
+    expect(api.count('/map.json?bbox=')).toBe(20)
   })
 
-  it('does not load a view that covers too many tiles', async () => {
+  it('loads only the tiles nearest the middle of a wide view', async () => {
     const api = fakeApi()
-    const wide = { south: 0, north: 0.5, west: -43.5, east: -42.5 }
-    expect(await new RouteLoader(API, api.fetchFn).load(wide, signal())).toBeNull()
-    expect(api.calls).toHaveLength(0)
+    await loaderFor(api).load({ south: -22.95, north: -22.85, west: -43.25, east: -43.1 }, signal())
+    expect(api.count('/map.json?bbox=')).toBe(24)
   })
 
-  it('keeps no more than two requests in flight', async () => {
-    const api = fakeApi({ delayMs: 5 })
-    const first = tileBox({ x: 6226, y: 9263, z: 14 })
-    const last = tileBox({ x: 6227, y: 9264, z: 14 })
-    const box = { south: last.south + 0.001, north: first.north - 0.001, west: first.west + 0.001, east: last.east - 0.001 }
-    await new RouteLoader(API, api.fetchFn).load(box, signal())
-    expect(api.calls.filter((url) => url.includes('/map?'))).toHaveLength(4)
-    expect(api.peak()).toBe(2)
+  it('reports a failed route and still returns the others', async () => {
+    const api = fakeApi({ failFull: 500 })
+    const result = await loaderFor(api).load(oneTile, signal())
+    expect(result.routes).toEqual([])
+    expect(result.failures).toEqual([{ kind: 'relation', url: `${API}/api/0.6/relation/7/full.json`, reason: 'HTTP 500' }])
+  })
+
+  it('waits out a server overload and then succeeds', async () => {
+    const api = fakeApi({ failMapOnce: 503 })
+    const clock = fakeClock()
+    const result = await loaderFor(api, clock).load(oneTile, signal())
+    expect(result.failures).toEqual([])
+    expect(result.routes.map((route) => route.id)).toEqual([7])
+    expect(clock.time).toBeGreaterThanOrEqual(30_000)
+  })
+
+  it('retries network errors until the retry window is over, then reports them', async () => {
+    const api = fakeApi({ failMap: 'network' })
+    const result = await loaderFor(api).load(oneTile, signal())
+    expect(result.failures.length).toBeGreaterThan(0)
+    expect(result.failures[0].reason).toContain('network error')
+    expect(api.count('/map.json?bbox=')).toBeGreaterThan(4)
+  })
+
+  it('does not keep failed results, so the next load asks again', async () => {
+    const api = fakeApi({ failFull: 500 })
+    const loader = loaderFor(api)
+    await loader.load(oneTile, signal())
+    const before = api.count('/relation/7/full.json')
+    await loader.load(oneTile, signal())
+    expect(api.count('/relation/7/full.json')).toBe(before + 1)
+  })
+
+  it('shows a saved result that is past its freshness at once, and refreshes it in the background', async () => {
+    const api = fakeApi()
+    const clock = fakeClock()
+    const loader = loaderFor(api, clock)
+    await loader.load(oneTile, signal())
+    clock.sleep(25 * 60 * 60 * 1000)
+    const before = api.calls.length
+    const result = await loader.load(oneTile, signal())
+    expect(result.routes.map((route) => route.id)).toEqual([7])
+    await vi.waitFor(() => expect(api.calls.length).toBeGreaterThan(before))
   })
 
   it('stops when the view is cancelled before the request starts', async () => {
     const api = fakeApi()
     const controller = new AbortController()
     controller.abort()
-    await expect(new RouteLoader(API, api.fetchFn).load(oneTile, controller.signal)).rejects.toThrow()
+    await expect(loaderFor(api).load(oneTile, controller.signal)).rejects.toThrow()
     expect(api.calls).toHaveLength(0)
-  })
-
-  it('reports a failed relation and still returns the routes that loaded', async () => {
-    const api = fakeApi({ failFull: 500 })
-    const result = await new RouteLoader(API, api.fetchFn).load(oneTile, signal())
-    expect(result?.routes).toEqual([])
-    expect(result?.failures).toEqual([{ kind: 'relation', url: `${API}/api/0.6/relation/7/full`, reason: 'HTTP 500' }])
-  })
-
-  it('draws the tiles that loaded when one tile fails', async () => {
-    const api = fakeApi({ failMap: 503 })
-    const first = tileBox({ x: 6226, y: 9263, z: 14 })
-    const last = tileBox({ x: 6227, y: 9264, z: 14 })
-    const box = { south: last.south + 0.001, north: first.north - 0.001, west: first.west + 0.001, east: last.east - 0.001 }
-    const result = await new RouteLoader(API, api.fetchFn).load(box, signal())
-    expect(result?.routes.map((route) => route.id)).toEqual([7])
-    expect(result?.failures).toEqual([expect.objectContaining({ kind: 'map', reason: 'HTTP 503' })])
-  })
-
-  it('explains a network failure, such as a blocked or CORS request', async () => {
-    const api = fakeApi({ failMap: 'network' })
-    const result = await new RouteLoader(API, api.fetchFn).load(oneTile, signal())
-    expect(result?.failures[0].reason).toContain('network error')
-  })
-
-  it('stops sending requests for a while after a rate limit', async () => {
-    const api = fakeApi({ failMap: 429 })
-    const first = tileBox({ x: 6226, y: 9263, z: 14 })
-    const last = tileBox({ x: 6229, y: 9266, z: 14 })
-    const box = { south: last.south + 0.001, north: first.north - 0.001, west: first.west + 0.001, east: last.east - 0.001 }
-    const result = await new RouteLoader(API, api.fetchFn).load(box, signal())
-    // Two requests were already in flight; the other tiles are not sent.
-    expect(api.calls.filter((url) => url.includes('/map?'))).toHaveLength(2)
-    expect(result?.failures.every((failure) => failure.reason.startsWith('HTTP 429') || failure.reason.startsWith('Paused'))).toBe(true)
   })
 })

@@ -71,8 +71,8 @@ export default defineConfig(({ mode }) => {
       coverage: {
         provider: 'v8',
         include: ['src/core/**'],
-        // config.ts only holds constants.
-        exclude: ['src/core/config.ts'],
+        // config.ts only holds constants. idb-store.ts needs a browser database and is checked by hand.
+        exclude: ['src/core/config.ts', 'src/core/data/idb-store.ts'],
         thresholds: { lines: 85, branches: 85 },
       },
     },

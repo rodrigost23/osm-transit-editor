@@ -44,7 +44,9 @@ The text you search for is sent to Nominatim. The visible map area is sent to th
 
 ## Data loading
 
-Subway routes are read from the OpenStreetMap API. The visible area is split into zoom 14 tiles, and each tile is requested with the `map` call. Each route found is then loaded in full with `relation/{id}/full`. At most two requests run at once, and loaded tiles and routes are kept in memory.
+Subway routes come from the OpenStreetMap API, in JSON. The six tiles nearest the middle of the view are split into quarters, and the quarters nearest the middle are requested first, so the map fills in as they arrive. Each route found is then loaded in full with `relation/{id}/full.json`. At most two requests run at once. Requests that time out or fail with a network error are retried for up to a minute. A `429`, `503` or `509` pauses requests for 30 seconds, or for `Retry-After` when the browser exposes it.
+
+Results are kept in memory and in IndexedDB for 24 hours. An older result is shown at once and refreshed in the background. Failed or partial results are never kept. If IndexedDB is unavailable, the map still works without it.
 
 The amount of data per tile has not been measured yet.
 

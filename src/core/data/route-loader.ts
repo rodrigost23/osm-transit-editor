@@ -1,15 +1,26 @@
 import { type RouteSource } from './geojson'
-import { parseOsmXml, type OsmData } from './osm-xml'
+import { parseOsmJson, type OsmData } from './osm-json'
+import { type Entry, type Store, MemoryStore } from './store'
 import { splitBox, tileBox, tilesCovering, type BoundingBox, type Tile } from './tiles'
 
 // OpenStreetMap asks API clients to keep to two simultaneous requests.
 const CONCURRENCY = 2
-// A view covering more tiles than this is not loaded; the map asks the user to zoom in.
-const MAX_TILES = 24
-// A box the API refuses as too large is split into quarters, up to this depth.
-const MAX_SPLIT_DEPTH = 2
-// After a rate limit (429) or a bandwidth limit (509), no new requests are sent for a while.
-const PAUSE_MS = 30_000
+// Only the tiles nearest the map centre are loaded, so panning is not met with a flood of requests.
+const NEAREST_TILES = 6
+const REQUEST_TIMEOUT_MS = 30_000
+// Network errors and timeouts are retried with a growing delay, for up to this long.
+const RETRY_WINDOW_MS = 60_000
+const FIRST_RETRY_MS = 1_000
+const MAX_RETRY_DELAY_MS = 16_000
+// After a rate limit or a server overload, requests wait this long, or Retry-After when given.
+const COOLDOWN_MS = 30_000
+const COOLING_STATUS = new Set([429, 503, 509])
+// A box the API refuses as too large is split into quarters, up to this many levels deeper.
+const MAX_SPLIT_DEPTH = 4
+// Saved data younger than this is used as is. Older data is shown at once and refreshed in the background.
+const FRESH_MS = 24 * 60 * 60 * 1000
+// Part of every cache key. Change it when the saved shape changes.
+const FORMAT_VERSION = 'v1'
 
 export class OsmHttpError extends Error {
   readonly status: number
@@ -19,6 +30,9 @@ export class OsmHttpError extends Error {
     this.status = status
   }
 }
+
+/** No response, or no answer in time. These are retried. */
+export class TransportError extends Error {}
 
 /** A request that did not give a route. The rest of the view still loads. */
 export interface LoadFailure {
@@ -32,15 +46,23 @@ export interface LoadResult {
   failures: LoadFailure[]
 }
 
+type Fetch = (url: string, init?: RequestInit) => Promise<Response>
+type Sleep = (ms: number, signal: AbortSignal) => Promise<void>
+
+export interface LoaderOptions {
+  fetchFn?: Fetch
+  store?: Store
+  now?: () => number
+  sleep?: Sleep
+}
+
 /** Text that says why a request failed, for the console and the notice on the map. */
 export function describeError(error: unknown): string {
   if (error instanceof OsmHttpError) {
     if (error.status === 429) return 'HTTP 429 (rate limited)'
     if (error.status === 509) return 'HTTP 509 (bandwidth limit)'
-    return `HTTP ${error.status}`
+    return error.message
   }
-  // fetch() rejects with a TypeError when the request never gets a response: offline, blocked, or CORS.
-  if (error instanceof TypeError) return 'network error (no response: offline, blocked, or CORS)'
   if (error instanceof Error) return error.message
   return String(error)
 }
@@ -74,118 +96,212 @@ export function relationRoute(data: OsmData, id: number): RouteSource {
 export function mapUrl(apiUrl: string, box: BoundingBox): string {
   // The API takes the bounds as left, bottom, right, top.
   const bbox = [box.west, box.south, box.east, box.north].join(',')
-  return `${apiUrl}/api/0.6/map?bbox=${bbox}`
+  return `${apiUrl}/api/0.6/map.json?bbox=${bbox}`
 }
 
 export function relationFullUrl(apiUrl: string, id: number): string {
-  return `${apiUrl}/api/0.6/relation/${id}/full`
+  return `${apiUrl}/api/0.6/relation/${id}/full.json`
 }
 
-type Fetch = (url: string, init?: RequestInit) => Promise<Response>
+const defaultSleep: Sleep = (ms, signal) =>
+  new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(cancelled())
+    }
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
 
 /**
- * Loads subway routes for the visible area, tile by tile. A tile or route that fails is
- * reported and the rest still loads. Loaded tiles and routes are kept, so panning back
- * and forth does not repeat requests, and failed ones are asked for again next time.
+ * Loads subway routes for the visible area. Each tile is split into quarters, and the
+ * quarters nearest the centre are asked for first. The map is redrawn as each quarter
+ * arrives. A failing request is reported, and the rest still loads.
+ *
+ * Results are kept in a store: fresh results are used as they are, older ones are shown
+ * at once and refreshed in the background. Failed or partial results are never kept.
  */
 export class RouteLoader {
-  private readonly tileRelations = new Map<string, number[]>()
-  private readonly routes = new Map<number, RouteSource>()
+  private readonly apiUrl: string
+  private readonly fetchFn: Fetch
+  private readonly store: Store
+  private readonly now: () => number
+  private readonly sleep: Sleep
   private active = 0
   private readonly waiting: (() => void)[] = []
   private pausedUntil = 0
 
-  private readonly apiUrl: string
-  private readonly fetchFn: Fetch
-
-  constructor(apiUrl: string, fetchFn: Fetch = fetch) {
+  constructor(apiUrl: string, options: LoaderOptions = {}) {
     this.apiUrl = apiUrl
-    this.fetchFn = fetchFn
+    this.fetchFn = options.fetchFn ?? fetch
+    this.store = options.store ?? new MemoryStore(300)
+    this.now = options.now ?? Date.now
+    this.sleep = options.sleep ?? defaultSleep
   }
 
-  /** Routes that cross the box, or null when the box covers too many tiles to load. */
-  async load(box: BoundingBox, signal: AbortSignal): Promise<LoadResult | null> {
+  /** Loads the routes crossing the box. onUpdate is called each time more of them are ready. */
+  async load(box: BoundingBox, signal: AbortSignal, onUpdate?: (result: LoadResult) => void): Promise<LoadResult> {
+    const centre = centreOf(box)
     const tiles = tilesCovering(box)
-    if (tiles.length > MAX_TILES) return null
+      .sort((a, b) => distance(centreOf(tileBox(a)), centre) - distance(centreOf(tileBox(b)), centre))
+      .slice(0, NEAREST_TILES)
+    const quarters = tiles
+      .flatMap((tile) => splitBox(tileBox(tile)).map((part, index) => ({ key: `${FORMAT_VERSION}/${tileKey(tile)}/${index}`, box: part })))
+      .sort((a, b) => distance(centreOf(a.box), centre) - distance(centreOf(b.box), centre))
 
+    const routes = new Map<number, RouteSource>()
     const failures: LoadFailure[] = []
-    const tileOutcomes = await Promise.allSettled(tiles.map((tile) => this.loadTile(tile, signal)))
-    throwIfCancelled(signal)
-    tileOutcomes.forEach((outcome, index) => {
-      if (outcome.status === 'rejected') {
-        failures.push({ kind: 'map', url: mapUrl(this.apiUrl, tileBox(tiles[index])), reason: describeError(outcome.reason) })
-      }
-    })
-
-    const ids = new Set<number>()
-    for (const tile of tiles) {
-      for (const id of this.tileRelations.get(tileKey(tile)) ?? []) ids.add(id)
+    const reported = new Set<string>()
+    const pending = new Map<number, Promise<RouteSource>>()
+    const report = (failure: LoadFailure) => {
+      if (reported.has(failure.url)) return
+      reported.add(failure.url)
+      failures.push(failure)
     }
-    const missing = [...ids].filter((id) => !this.routes.has(id))
-    const routeOutcomes = await Promise.allSettled(missing.map((id) => this.loadRoute(id, signal)))
-    throwIfCancelled(signal)
-    routeOutcomes.forEach((outcome, index) => {
-      if (outcome.status === 'rejected') {
-        failures.push({
-          kind: 'relation',
-          url: relationFullUrl(this.apiUrl, missing[index]),
-          reason: describeError(outcome.reason),
-        })
+    // A route shared by several quarters is asked for once.
+    const routeFor = (id: number): Promise<RouteSource> => {
+      let promise = pending.get(id)
+      if (!promise) {
+        promise = this.remember(`route/${FORMAT_VERSION}/${id}`, signal, (s) => this.fetchRoute(id, s))
+        pending.set(id, promise)
       }
-    })
+      return promise
+    }
 
-    const routes = [...ids].flatMap((id) => this.routes.get(id) ?? [])
-    return { routes, failures }
+    await Promise.all(
+      quarters.map(async (quarter) => {
+        let ids: number[]
+        try {
+          ids = await this.remember(quarter.key, signal, (s) => this.fetchQuarter(quarter.box, s, 0))
+        } catch (error) {
+          if (!signal.aborted) report({ kind: 'map', url: mapUrl(this.apiUrl, quarter.box), reason: describeError(error) })
+          return
+        }
+        await Promise.all(
+          ids.map(async (id) => {
+            try {
+              routes.set(id, await routeFor(id))
+            } catch (error) {
+              if (!signal.aborted) report({ kind: 'relation', url: relationFullUrl(this.apiUrl, id), reason: describeError(error) })
+            }
+          }),
+        )
+        if (!signal.aborted && onUpdate) onUpdate({ routes: [...routes.values()], failures: [...failures] })
+      }),
+    )
+    throwIfCancelled(signal)
+    return { routes: [...routes.values()], failures }
   }
 
-  private async loadTile(tile: Tile, signal: AbortSignal): Promise<void> {
-    const key = tileKey(tile)
-    if (this.tileRelations.has(key)) return
-    const ids = await this.fetchBox(tileBox(tile), signal, 0)
-    this.tileRelations.set(key, ids)
+  /** Answers from the store when it can, and saves what it fetched when it succeeds. */
+  private async remember<T>(key: string, signal: AbortSignal, load: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    const saved = await this.store.get(key)
+    if (saved && this.now() - saved.savedAt < FRESH_MS) return saved.value as T
+    if (saved) {
+      void this.refresh(key, load)
+      return saved.value as T
+    }
+    const value = await load(signal)
+    this.save(key, value)
+    return value
   }
 
-  private async fetchBox(box: BoundingBox, signal: AbortSignal, depth: number): Promise<number[]> {
-    let xml: string
+  private async refresh<T>(key: string, load: (signal: AbortSignal) => Promise<T>): Promise<void> {
     try {
-      xml = await this.get(mapUrl(this.apiUrl, box), signal)
+      this.save(key, await load(new AbortController().signal))
+    } catch {
+      // The older copy stays in the store until a later load succeeds.
+    }
+  }
+
+  private save(key: string, value: unknown): void {
+    const entry: Entry = { value, savedAt: this.now() }
+    void this.store.set(key, entry).catch(() => undefined)
+  }
+
+  private async fetchQuarter(box: BoundingBox, signal: AbortSignal, depth: number): Promise<number[]> {
+    try {
+      return subwayRouteIds(parseOsmJson(await this.request(mapUrl(this.apiUrl, box), signal)))
     } catch (error) {
       // 400 from the map call means the box holds too much data. Split it and ask for the parts.
       if (error instanceof OsmHttpError && error.status === 400 && depth < MAX_SPLIT_DEPTH) {
         const ids = new Set<number>()
         for (const part of splitBox(box)) {
-          for (const id of await this.fetchBox(part, signal, depth + 1)) ids.add(id)
+          for (const id of await this.fetchQuarter(part, signal, depth + 1)) ids.add(id)
         }
         return [...ids]
       }
       throw error
     }
-    return subwayRouteIds(parseOsmXml(xml))
   }
 
-  private async loadRoute(id: number, signal: AbortSignal): Promise<void> {
-    if (this.routes.has(id)) return
-    const xml = await this.get(relationFullUrl(this.apiUrl, id), signal)
-    this.routes.set(id, relationRoute(parseOsmXml(xml), id))
+  private async fetchRoute(id: number, signal: AbortSignal): Promise<RouteSource> {
+    const text = await this.request(relationFullUrl(this.apiUrl, id), signal)
+    return relationRoute(parseOsmJson(text), id)
   }
 
-  private get(url: string, signal: AbortSignal): Promise<string> {
+  /** A GET with a timeout. Network errors and timeouts are retried; other HTTP errors are not. */
+  private async request(url: string, signal: AbortSignal): Promise<string> {
+    const started = this.now()
+    let delay = FIRST_RETRY_MS
+    for (;;) {
+      try {
+        return await this.limited(signal, () => this.once(url, signal))
+      } catch (error) {
+        const retryable = error instanceof TransportError || (error instanceof OsmHttpError && COOLING_STATUS.has(error.status))
+        if (!retryable || signal.aborted || this.now() - started + delay > RETRY_WINDOW_MS) throw error
+        await this.sleep(delay, signal)
+        delay = Math.min(delay * 2, MAX_RETRY_DELAY_MS)
+      }
+    }
+  }
+
+  private async once(url: string, signal: AbortSignal): Promise<string> {
     // A plain GET with no custom headers, so the browser needs no CORS preflight.
-    return this.limited(signal, async () => {
-      const response = await this.fetchFn(url, { signal })
-      if (response.status === 429 || response.status === 509) this.pausedUntil = Date.now() + PAUSE_MS
-      if (!response.ok) throw new OsmHttpError(response.status)
-      return response.text()
-    })
+    const controller = new AbortController()
+    const cancel = () => controller.abort()
+    signal.addEventListener('abort', cancel, { once: true })
+    let timedOut = false
+    const timer = setTimeout(() => {
+      timedOut = true
+      controller.abort()
+    }, REQUEST_TIMEOUT_MS)
+    try {
+      const response = await this.fetchFn(url, { signal: controller.signal })
+      if (!response.ok) {
+        if (COOLING_STATUS.has(response.status)) this.cool(retryAfterMs(response) || COOLDOWN_MS)
+        throw new OsmHttpError(response.status)
+      }
+      return await response.text()
+    } catch (error) {
+      if (signal.aborted) throw cancelled()
+      if (timedOut) throw new TransportError(`no answer within ${REQUEST_TIMEOUT_MS / 1000} s`)
+      if (error instanceof OsmHttpError) throw error
+      // fetch() rejects with a TypeError when no response arrives: offline, blocked, or CORS.
+      if (error instanceof TypeError) throw new TransportError('network error (no response: offline, blocked, or CORS)')
+      throw error
+    } finally {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', cancel)
+    }
   }
 
-  /** Runs a request once a slot is free. A slot passes straight to the next waiting request. */
+  private cool(ms: number): void {
+    this.pausedUntil = Math.max(this.pausedUntil, this.now() + ms)
+  }
+
+  /** Runs a request once a slot is free and any cooldown is over. A slot passes straight to the next waiting request. */
   private async limited<T>(signal: AbortSignal, task: () => Promise<T>): Promise<T> {
     if (this.active < CONCURRENCY) this.active++
     else await new Promise<void>((resolve) => this.waiting.push(resolve))
     try {
+      for (let wait = this.pausedUntil - this.now(); wait > 0; wait = this.pausedUntil - this.now()) {
+        await this.sleep(wait, signal)
+      }
       throwIfCancelled(signal)
-      if (Date.now() < this.pausedUntil) throw new Error('Paused after a rate limit; not sending more requests yet')
       return await task()
     } finally {
       const next = this.waiting.shift()
@@ -195,8 +311,27 @@ export class RouteLoader {
   }
 }
 
+/** Seconds from Retry-After, in milliseconds. Browsers only expose the header when the server allows it. */
+function retryAfterMs(response: Response): number {
+  const seconds = Number(response.headers.get('Retry-After'))
+  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 0
+}
+
+function cancelled(): DOMException {
+  return new DOMException('Request cancelled', 'AbortError')
+}
+
 function throwIfCancelled(signal: AbortSignal): void {
-  if (signal.aborted) throw new DOMException('Request cancelled', 'AbortError')
+  if (signal.aborted) throw cancelled()
+}
+
+function centreOf(box: BoundingBox): { lat: number; lon: number } {
+  return { lat: (box.south + box.north) / 2, lon: (box.west + box.east) / 2 }
+}
+
+/** Squared distance in degrees. Only used to put things in order, so the projection does not matter. */
+function distance(a: { lat: number; lon: number }, b: { lat: number; lon: number }): number {
+  return (a.lat - b.lat) ** 2 + (a.lon - b.lon) ** 2
 }
 
 function tileKey({ x, y, z }: Tile): string {
