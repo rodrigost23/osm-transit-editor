@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { resolveColour } from '@/core/data/colour'
-import { routesToGeoJSON } from '@/core/data/geojson'
-import type { OverpassResponse } from '@/core/data/overpass'
+import { routesToGeoJSON, type RouteSource } from '@/core/data/geojson'
 
 describe('resolveColour', () => {
   it('keeps valid hex colours', () => {
@@ -17,46 +16,25 @@ describe('resolveColour', () => {
 })
 
 describe('routesToGeoJSON', () => {
-  const response: OverpassResponse = {
-    elements: [
-      {
-        type: 'relation' as const,
-        id: 7944060,
-        tags: { ref: '1', name: 'Metrô Rio Linha 1', operator: 'Metrô Rio', colour: '#f58220' },
-        members: [
-          { type: 'node', ref: 1, role: 'stop' },
-          {
-            type: 'way',
-            ref: 10,
-            role: '',
-            geometry: [
-              { lat: -22.9, lon: -43.2 },
-              { lat: -22.91, lon: -43.21 },
-            ],
-          },
-          { type: 'way', ref: 11, role: '', geometry: [{ lat: -22.91, lon: -43.21 }] },
-        ],
-      },
-      { type: 'relation', id: 2, tags: { route: 'subway' }, members: [] },
-    ],
-  }
-
-  it('makes one MultiLineString per route with ways that have geometry', () => {
-    const collection = routesToGeoJSON(response)
-    expect(collection.features).toHaveLength(1)
-    const [feature] = collection.features
-    expect(feature.geometry.type).toBe('MultiLineString')
-    expect(feature.geometry.coordinates).toEqual([
+  const route: RouteSource = {
+    id: 7944060,
+    tags: { ref: '1', name: 'Metrô Rio Linha 1', operator: 'Metrô Rio', colour: '#f58220' },
+    lines: [
       [
         [-43.2, -22.9],
         [-43.21, -22.91],
       ],
-    ])
+    ],
+  }
+
+  it('makes one MultiLineString per route', () => {
+    const collection = routesToGeoJSON([route])
+    expect(collection.features).toHaveLength(1)
+    expect(collection.features[0].geometry).toEqual({ type: 'MultiLineString', coordinates: route.lines })
   })
 
   it('copies the tags into properties and marks the colour as valid', () => {
-    const [feature] = routesToGeoJSON(response).features
-    expect(feature.properties).toEqual({
+    expect(routesToGeoJSON([route]).features[0].properties).toEqual({
       relationId: 7944060,
       ref: '1',
       name: 'Metrô Rio Linha 1',
@@ -66,16 +44,12 @@ describe('routesToGeoJSON', () => {
     })
   })
 
-  it('uses empty strings and grey when tags are missing', () => {
-    const [feature] = routesToGeoJSON({
-      elements: [
-        {
-          type: 'relation',
-          id: 3,
-          members: [{ type: 'way', ref: 1, role: '', geometry: [{ lat: 0, lon: 0 }, { lat: 1, lon: 1 }] }],
-        },
-      ],
-    }).features
-    expect(feature.properties).toMatchObject({ ref: '', name: '', operator: '', colour: '#8a8a8a', colourValid: false })
+  it('uses empty strings and grey when tags are missing, and skips routes without lines', () => {
+    const collection = routesToGeoJSON([
+      { id: 3, tags: {}, lines: [[[0, 0], [1, 1]]] },
+      { id: 4, tags: {}, lines: [] },
+    ])
+    expect(collection.features).toHaveLength(1)
+    expect(collection.features[0].properties).toMatchObject({ ref: '', name: '', operator: '', colour: '#8a8a8a', colourValid: false })
   })
 })

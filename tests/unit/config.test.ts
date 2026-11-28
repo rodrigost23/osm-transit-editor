@@ -7,7 +7,7 @@ describe('config', () => {
   })
 
   it('uses HTTPS endpoints', () => {
-    for (const url of [config.osmApiUrl, ...config.overpassUrls, config.nominatimUrl]) {
+    for (const url of [config.osmApiUrl, config.nominatimUrl]) {
       expect(url).toMatch(/^https:\/\//)
     }
   })

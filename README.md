@@ -25,7 +25,7 @@ npm run dev
 
 ## Configuration
 
-Copy `.env.example` to `.env` to change the base path or the OSM, Overpass and Nominatim endpoints. The Content Security Policy only allows the endpoints configured there, so changing one means rebuilding.
+Copy `.env.example` to `.env` to change the base path or the OSM API and Nominatim endpoints. The Content Security Policy only allows the endpoints configured there, so changing one means rebuilding.
 
 ## Structure
 
@@ -40,11 +40,13 @@ Every push to `main` runs CI (`.github/workflows/ci.yml`) and deploys to GitHub 
 
 ## Privacy
 
-The text you search for and the visible map area are sent to Nominatim and Overpass. Map tiles come from OpenFreeMap. There is no telemetry.
+The text you search for is sent to Nominatim. The visible map area is sent to the OpenStreetMap API as tile requests. Map tiles come from OpenFreeMap. There is no telemetry.
 
-## Overpass payload
+## Data loading
 
-To be measured with Rio de Janeiro and recorded here.
+Subway routes are read from the OpenStreetMap API. The visible area is split into zoom 14 tiles, and each tile is requested with the `map` call. Each route found is then loaded in full with `relation/{id}/full`. At most two requests run at once, and loaded tiles and routes are kept in memory.
+
+The amount of data per tile has not been measured yet.
 
 ## Data and license
 

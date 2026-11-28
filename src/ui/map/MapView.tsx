@@ -3,9 +3,8 @@ import * as maplibregl from 'maplibre-gl'
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { config } from '@/core/config'
-import { fetchSubwayRoutes, localEndpointMemory } from '@/core/data/overpass'
-import { gridToBox, RouteCache, snapToGrid } from '@/core/data/route-cache'
 import { routesToGeoJSON, type RouteCollection } from '@/core/data/geojson'
+import { RouteLoader } from '@/core/data/route-loader'
 import { formatHash, parseHash } from '@/core/map/position'
 import { baseStyleUrl } from './base-style'
 
@@ -36,10 +35,9 @@ export function MapView() {
       zoom: start.zoom,
     })
 
-    // Each new query cancels the one still in flight, so only the latest view can update the map.
+    // Each new view cancels the request still in flight, so only the latest view can update the map.
     let controller: AbortController | undefined
-    const routeCache = new RouteCache()
-    const memory = localEndpointMemory()
+    const loader = new RouteLoader(config.osmApiUrl)
     let debounce: ReturnType<typeof setTimeout> | undefined
     const loadLines = async () => {
       const source = map.getSource<maplibregl.GeoJSONSource>(SOURCE_ID)
@@ -56,27 +54,15 @@ export function MapView() {
       const current = new AbortController()
       controller = current
       const bounds = map.getBounds()
-      const grid = snapToGrid({
-        south: bounds.getSouth(),
-        west: bounds.getWest(),
-        north: bounds.getNorth(),
-        east: bounds.getEast(),
-      })
-      const cached = routeCache.find(grid)
-      if (cached) {
-        source.setData(routesToGeoJSON(cached))
-        setLoading(false)
-        setLoadError(false)
-        return
-      }
       setLoading(true)
       try {
-        const response = await fetchSubwayRoutes(config.overpassUrls, gridToBox(grid), {
-          signal: current.signal,
-          memory,
-        })
-        routeCache.store(grid, response)
-        source.setData(routesToGeoJSON(response))
+        const routes = await loader.load(
+          { south: bounds.getSouth(), west: bounds.getWest(), north: bounds.getNorth(), east: bounds.getEast() },
+          current.signal,
+        )
+        // Null means the view covers too many tiles to load at once.
+        source.setData(routes ? routesToGeoJSON(routes) : emptyRoutes)
+        setZoomedOut(routes === null)
         setLoading(false)
         setLoadError(false)
       } catch (error) {
@@ -130,7 +116,7 @@ export function MapView() {
       {loading && !zoomedOut && !loadError && <p className="zoom-hint">Loading lines…</p>}
       {loadError && (
         <div className="map-notice" role="alert">
-          <span>Could not load lines. The data service may be busy.</span>
+          <span>Could not load lines. The OpenStreetMap API may be busy.</span>
           <button type="button" onClick={() => retry.current()}>
             Try again
           </button>
