@@ -50,21 +50,26 @@ describe('stopsToGeoJSON', () => {
     stops,
   })
 
-  it('draws a station once when several stops share its name, in the colour of the lowest route id', () => {
+  it('draws one dot per stop, in the colour of the lowest route id, and names a station once', () => {
     const collection = stopsToGeoJSON([
       route(9, '#00aa00', [stop]),
       route(3, '#ff0000', [stop, { ...stop, key: 'n2', lat: -22.91, lon: -43.19 }, { ...stop, key: 'n3', name: 'Uruguai' }]),
     ])
     expect(collection.features.map((feature) => feature.properties)).toEqual([
-      { name: 'Carioca', colour: '#ff0000' },
-      { name: 'Uruguai', colour: '#ff0000' },
+      { name: 'Carioca', label: 'Carioca', primary: 'true', colour: '#ff0000' },
+      { name: 'Carioca', label: '', primary: 'false', colour: '#ff0000' },
+      { name: 'Uruguai', label: 'Uruguai', primary: 'true', colour: '#ff0000' },
     ])
     expect(collection.features[0].geometry).toEqual({ type: 'Point', coordinates: [-43.18, -22.9] })
+    expect(collection.features[1].geometry).toEqual({ type: 'Point', coordinates: [-43.19, -22.91] })
   })
 
-  it('keeps unnamed stops apart by their node', () => {
-    const collection = stopsToGeoJSON([route(1, '#fff', [{ ...stop, name: '', key: 'n5' }, { ...stop, name: '', key: 'n6' }])])
+  it('draws a stop shared by parallel ways once, and keeps the second way of a station', () => {
+    const forward = { ...stop, key: 'n10' }
+    const backward = { ...stop, key: 'n11', lat: -22.901, lon: -43.181 }
+    const collection = stopsToGeoJSON([route(1, '#fff', [forward]), route(2, '#fff', [backward, { ...stop, key: 'n10' }])])
     expect(collection.features).toHaveLength(2)
+    expect(collection.features.map((feature) => feature.properties.primary)).toEqual(['true', 'false'])
   })
 
   it('treats routes saved without stops as having none', () => {

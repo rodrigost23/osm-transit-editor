@@ -72,22 +72,31 @@ export class RouteChangeTracker {
 }
 
 /**
- * One point per station. Stops with the same name are one station, drawn once, in the colour of the
- * first route (by id) that serves them. Unnamed stops are kept apart by their node.
+ * One point per stop, in the colour of the first route (by id) that serves it. A stop shared by
+ * several routes is drawn once. Each stop carries a `label` (its name, only on the first stop
+ * with that name, so a station is named once) and `primary` (true only on that same first stop,
+ * for the zoomed-out view, where one dot per station is enough).
  */
 export function stopsToGeoJSON(routes: readonly RouteSource[]): PointCollection {
-  const seen = new Set<string>()
+  const seenKeys = new Set<string>()
+  const seenNames = new Set<string>()
   const features: PointFeature[] = []
   for (const route of [...routes].sort((a, b) => a.id - b.id)) {
     const { colour } = resolveColour(route.tags.colour)
     for (const stop of route.stops ?? []) {
-      const identity = stop.name ? `name:${stop.name}` : stop.key
-      if (seen.has(identity)) continue
-      seen.add(identity)
+      if (seenKeys.has(stop.key)) continue
+      seenKeys.add(stop.key)
+      const firstWithName = !stop.name || !seenNames.has(stop.name)
+      if (stop.name) seenNames.add(stop.name)
       features.push({
         type: 'Feature',
         geometry: { type: 'Point', coordinates: [stop.lon, stop.lat] },
-        properties: { name: stop.name, colour },
+        properties: {
+          name: stop.name,
+          label: firstWithName ? stop.name : '',
+          primary: String(firstWithName),
+          colour,
+        },
       })
     }
   }
