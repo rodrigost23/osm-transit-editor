@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react'
 import * as maplibregl from 'maplibre-gl'
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url'
 import 'maplibre-gl/dist/maplibre-gl.css'
@@ -33,7 +33,17 @@ const LABEL_MIN_ZOOM = 12
 const MOVE_DEBOUNCE_MS = 400
 const emptyRoutes: RouteCollection = { type: 'FeatureCollection', features: [] }
 
-export function MapView({ target }: { target?: MapTarget }) {
+interface MapViewProps {
+  target?: MapTarget
+  /** Every route loaded so far. The parent keeps it, so it can search them. */
+  known: RouteSource[]
+  setKnown: Dispatch<SetStateAction<RouteSource[]>>
+  /** The line the user picked, on the map or in the search. */
+  selectedId: number | null
+  setSelectedId: Dispatch<SetStateAction<number | null>>
+}
+
+export function MapView({ target, known, setKnown, selectedId, setSelectedId }: MapViewProps) {
   const container = useRef<HTMLDivElement>(null)
   const mapRef = useRef<maplibregl.Map | null>(null)
   const retry = useRef<() => void>(() => {})
@@ -41,9 +51,6 @@ export function MapView({ target }: { target?: MapTarget }) {
   const [loading, setLoading] = useState(false)
   // What went wrong with the last load, or null when everything in view loaded.
   const [loadError, setLoadError] = useState<string | null>(null)
-  // Every route loaded so far, and the line the user picked on the map.
-  const [known, setKnown] = useState<RouteSource[]>([])
-  const [selectedId, setSelectedId] = useState<number | null>(null)
 
   useEffect(() => {
     if (!container.current) return
@@ -169,9 +176,9 @@ export function MapView({ target }: { target?: MapTarget }) {
       mapRef.current = null
       map.remove()
     }
-  }, [])
+  }, [setKnown, setSelectedId])
 
-  // A place chosen in the search moves the map there. The map then loads the lines of the new view.
+  // A place or line chosen in the search moves the map there. The map then loads the lines of the new view.
   useEffect(() => {
     if (target) mapRef.current?.flyTo({ center: [target.lon, target.lat], zoom: target.zoom })
   }, [target])

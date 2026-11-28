@@ -25,3 +25,34 @@ export function lineVariants(routes: readonly RouteSource[], id: number): RouteS
 function lineKey(route: RouteSource): string {
   return [route.tags.ref, route.tags.network, route.tags.operator].map((value) => value ?? '').join('|')
 }
+
+/** Lower case, without accents, so that "metro" finds "Metrô". */
+function fold(text: string): string {
+  return text.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase()
+}
+
+/** One route per line whose name, ref or operator contains the text. */
+export function searchLines(routes: readonly RouteSource[], query: string, limit = 8): RouteSource[] {
+  const needle = fold(query.trim())
+  if (!needle) return []
+  const found: RouteSource[] = []
+  const keys = new Set<string>()
+  for (const route of [...routes].sort((a, b) => a.id - b.id)) {
+    const haystack = fold([lineName(route), route.tags.ref, route.tags.operator].join(' '))
+    const key = lineKey(route)
+    if (!haystack.includes(needle) || keys.has(key)) continue
+    keys.add(key)
+    found.push(route)
+    if (found.length >= limit) break
+  }
+  return found
+}
+
+/** The middle of a route's points, or null when it has none. */
+export function routeCentre(route: RouteSource): { lat: number; lon: number } | null {
+  const points = route.lines.flat()
+  if (points.length === 0) return null
+  const lon = points.reduce((sum, [x]) => sum + x, 0) / points.length
+  const lat = points.reduce((sum, [, y]) => sum + y, 0) / points.length
+  return { lat, lon }
+}
