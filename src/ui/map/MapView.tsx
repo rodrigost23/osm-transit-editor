@@ -27,6 +27,8 @@ export interface MapTarget {
 const SOURCE_ID = 'transit-routes'
 const LAYER_ID = 'transit-routes-line'
 const LABEL_ID = 'transit-routes-label'
+// Refs are too crowded to read below this zoom.
+const LABEL_MIN_ZOOM = 12
 // Wait for the map to settle before querying, so a fast pan or zoom sends one request.
 const MOVE_DEBOUNCE_MS = 400
 const emptyRoutes: RouteCollection = { type: 'FeatureCollection', features: [] }
@@ -67,9 +69,10 @@ export function MapView({ target }: { target?: MapTarget }) {
       if (!source) return
       controller?.abort()
       if (map.getZoom() < config.minLineZoom) {
-        drawn.reset()
-        source.setData(emptyRoutes)
-        setZoomedOut(true)
+        // Zoomed out, nothing is requested. Lines loaded so far stay on the map.
+        const next = drawn.next([...seen.values()])
+        if (next) source.setData(next)
+        setZoomedOut(map.getZoom() < config.lineVisibleZoom)
         setLoading(false)
         setLoadError(null)
         return
@@ -128,6 +131,7 @@ export function MapView({ target }: { target?: MapTarget }) {
         id: LAYER_ID,
         type: 'line',
         source: SOURCE_ID,
+        minzoom: config.lineVisibleZoom,
         layout: { 'line-cap': 'round', 'line-join': 'round' },
         paint: { 'line-color': ['get', 'colour'], 'line-width': 4 },
       })
@@ -136,6 +140,7 @@ export function MapView({ target }: { target?: MapTarget }) {
         id: LABEL_ID,
         type: 'symbol',
         source: SOURCE_ID,
+        minzoom: LABEL_MIN_ZOOM,
         layout: { 'symbol-placement': 'line', 'text-field': ['get', 'ref'], 'text-font': ['Noto Sans Regular'], 'text-size': 12 },
         paint: { 'text-color': '#ffffff', 'text-halo-color': ['get', 'colour'], 'text-halo-width': 2 },
       })

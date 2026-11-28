@@ -5,6 +5,8 @@ export const config = {
   nominatimUrl: import.meta.env.VITE_NOMINATIM_URL,
   /** Minimum zoom to query lines. Matches the tile zoom used for the OSM map calls. */
   minLineZoom: 14,
+  /** Lines already loaded stay visible down to this zoom. Below it they are hidden. */
+  lineVisibleZoom: 10,
   /** Initial view: world map, without asking for geolocation. */
   initialView: { lat: 0, lon: 0, zoom: 1.5 },
 } as const
