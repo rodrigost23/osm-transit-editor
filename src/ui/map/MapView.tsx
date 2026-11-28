@@ -117,7 +117,10 @@ export function MapView({ target, setKnown, setSelectedId, setVisible, reloadRef
         publishVisible()
       }
       controller?.abort()
-      if (map.getZoom() < config.minLineZoom) {
+      // Between overpassLineZoom and minLineZoom, lines come from the Overpass mirrors in one query per view.
+      const viaMirrors =
+        map.getZoom() < config.minLineZoom && map.getZoom() >= config.overpassLineZoom && config.overpassUrls.length > 0
+      if (map.getZoom() < config.minLineZoom && !viaMirrors) {
         // Zoomed out, nothing is requested. Lines loaded so far stay on the map.
         const current = new AbortController()
         controller = current
@@ -164,7 +167,7 @@ export function MapView({ target, setKnown, setSelectedId, setVisible, reloadRef
           { south: bounds.getSouth(), west: bounds.getWest(), north: bounds.getNorth(), east: bounds.getEast() },
           current.signal,
           (partial) => draw(partial.routes),
-          { refresh },
+          { refresh, overpassFirst: viaMirrors },
         )
         // Routes that did load stay drawn even when some requests failed.
         draw(result.routes)

@@ -7,6 +7,8 @@ export const config = {
   overpassUrls: import.meta.env.VITE_OVERPASS_URLS.split(',').map((url) => url.trim()).filter(Boolean),
   /** Minimum zoom to query lines. Matches the tile zoom used for the OSM map calls. */
   minLineZoom: 14,
+  /** Below minLineZoom, lines come from the Overpass mirrors from this zoom on. Nothing is requested below it. */
+  overpassLineZoom: 10,
   /** Lines already loaded stay visible down to this zoom. Below it they are hidden. */
   lineVisibleZoom: 10,
   /** Initial view: world map, without asking for geolocation. */

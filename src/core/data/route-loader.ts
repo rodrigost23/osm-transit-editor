@@ -203,6 +203,11 @@ const defaultSleep: Sleep = (ms, signal) =>
 export interface LoadOptions {
   /** Ask the API again for the box and its routes, even when they are saved. */
   refresh?: boolean
+  /**
+   * Ask the Overpass mirrors first, with one query for the whole box. Used at zoom levels
+   * below the OSM API's line zoom, where its tile-sized requests would be too many.
+   */
+  overpassFirst?: boolean
 }
 
 /** A saved route from before stations and way ids were kept. It is refreshed once, so both appear. */
@@ -257,6 +262,9 @@ export class RouteLoader {
     onUpdate?: (result: LoadResult) => void,
     options: LoadOptions = {},
   ): Promise<LoadResult> {
+    if (options.overpassFirst && this.overpassUrls.length > 0) {
+      return this.loadFromMirrors(box, signal, onUpdate)
+    }
     const centre = centreOf(box)
     const tiles = tilesCovering(box)
       .sort((a, b) => distance(centreOf(tileBox(a)), centre) - distance(centreOf(tileBox(b)), centre))
@@ -392,6 +400,42 @@ export class RouteLoader {
   private async fetchRoute(id: number, signal: AbortSignal): Promise<RouteSource> {
     const text = await this.requestOrMirror(relationFullUrl(this.apiUrl, id), overpassRelationQuery(id), signal)
     return relationRoute(parseOsmJson(text), id)
+  }
+
+  /**
+   * Loads the box from the Overpass mirrors: one query for the subway relations in the box,
+   * then one per route. Nothing is kept in the store, so these results are always fresh.
+   */
+  private async loadFromMirrors(
+    box: BoundingBox,
+    signal: AbortSignal,
+    onUpdate?: (result: LoadResult) => void,
+  ): Promise<LoadResult> {
+    const routes = new Map<number, RouteSource>()
+    const failures: LoadFailure[] = []
+    const mirrorFailure = new TransportError('Overpass first')
+    let ids: number[]
+    try {
+      const text = await this.fromMirrors(overpassMapQuery(box), signal, mirrorFailure)
+      ids = subwayRouteIds(parseOsmJson(text))
+    } catch (error) {
+      if (signal.aborted) throw cancelled()
+      failures.push({ kind: 'map', url: this.overpassUrls[0], reason: describeError(error) })
+      return { routes: [], failures }
+    }
+    await Promise.all(
+      ids.map(async (id) => {
+        try {
+          const text = await this.fromMirrors(overpassRelationQuery(id), signal, mirrorFailure)
+          routes.set(id, relationRoute(parseOsmJson(text), id))
+        } catch (error) {
+          if (!signal.aborted) failures.push({ kind: 'relation', url: this.overpassUrls[0], reason: describeError(error) })
+        }
+        if (!signal.aborted && onUpdate) onUpdate({ routes: [...routes.values()], failures: [...failures] })
+      }),
+    )
+    throwIfCancelled(signal)
+    return { routes: [...routes.values()], failures }
   }
 
   /** The OSM API first. If it cannot answer, the Overpass mirrors are tried in order. */
