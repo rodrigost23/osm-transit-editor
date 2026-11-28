@@ -136,3 +136,62 @@ body {
   font: inherit;
   cursor: pointer;
 }
+
+.line-card {
+  position: absolute;
+  left: 16px;
+  bottom: 16px;
+  z-index: 1;
+  width: min(320px, calc(100% - 32px));
+  max-height: 50%;
+  overflow: auto;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--panel-bg);
+  color: var(--panel-fg);
+  box-shadow: var(--panel-shadow);
+  font-size: 14px;
+}
+
+.line-card header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.line-badge {
+  min-width: 28px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  color: #fff;
+  font-weight: 600;
+  text-align: center;
+}
+
+.line-card-close {
+  margin-left: auto;
+  border: 0;
+  background: none;
+  color: inherit;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.line-card-meta {
+  margin: 4px 0 0;
+  color: var(--panel-muted);
+  font-size: 12px;
+}
+
+.line-card ul {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.line-card li {
+  padding: 4px 0;
+  border-top: 1px solid var(--panel-border);
+  color: var(--panel-muted);
+}

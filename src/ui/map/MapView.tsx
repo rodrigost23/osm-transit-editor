@@ -5,10 +5,12 @@ import 'maplibre-gl/dist/maplibre-gl.css'
 import { config } from '@/core/config'
 import { RouteChangeTracker, type RouteCollection, type RouteSource } from '@/core/data/geojson'
 import { IndexedDbStore } from '@/core/data/idb-store'
+import { lineVariants } from '@/core/data/lines'
 import { describeError, RouteLoader } from '@/core/data/route-loader'
 import { LayeredStore, MemoryStore } from '@/core/data/store'
 import { formatHash, parseHash } from '@/core/map/position'
 import { baseStyleUrl } from './base-style'
+import { LineCard } from './LineCard'
 
 // MapLibre 6 resolves its worker next to its own module, which a bundler does
 // not emit. Pointing it at the bundled asset keeps the worker under the base path.
@@ -16,6 +18,7 @@ maplibregl.setWorkerUrl(workerUrl)
 
 const SOURCE_ID = 'transit-routes'
 const LAYER_ID = 'transit-routes-line'
+const LABEL_ID = 'transit-routes-label'
 // Wait for the map to settle before querying, so a fast pan or zoom sends one request.
 const MOVE_DEBOUNCE_MS = 400
 const emptyRoutes: RouteCollection = { type: 'FeatureCollection', features: [] }
@@ -27,6 +30,9 @@ export function MapView() {
   const [loading, setLoading] = useState(false)
   // What went wrong with the last load, or null when everything in view loaded.
   const [loadError, setLoadError] = useState<string | null>(null)
+  // Every route loaded so far, and the line the user picked on the map.
+  const [known, setKnown] = useState<RouteSource[]>([])
+  const [selectedId, setSelectedId] = useState<number | null>(null)
 
   useEffect(() => {
     if (!container.current) return
@@ -41,6 +47,7 @@ export function MapView() {
     // Each new view cancels the request still in flight, so only the latest view can update the map.
     let controller: AbortController | undefined
     const drawn = new RouteChangeTracker()
+    const seen = new Map<number, RouteSource>()
     const loader = new RouteLoader(config.osmApiUrl, {
       store: new LayeredStore(new MemoryStore(300), new IndexedDbStore()),
     })
@@ -66,6 +73,8 @@ export function MapView() {
         // Routes are drawn as parts of the view arrive, and again when all of it has.
         // Only a change in the set of routes reaches the map, so the lines do not flicker on every response.
         const draw = (routes: RouteSource[]) => {
+          for (const route of routes) seen.set(route.id, route)
+          setKnown([...seen.values()])
           const next = drawn.next(routes)
           if (next) source.setData(next)
         }
@@ -112,6 +121,24 @@ export function MapView() {
         layout: { 'line-cap': 'round', 'line-join': 'round' },
         paint: { 'line-color': ['get', 'colour'], 'line-width': 4 },
       })
+      // The ref is drawn along each line, in the line's colour as a halo.
+      map.addLayer({
+        id: LABEL_ID,
+        type: 'symbol',
+        source: SOURCE_ID,
+        layout: { 'symbol-placement': 'line', 'text-field': ['get', 'ref'], 'text-font': ['Noto Sans Regular'], 'text-size': 12 },
+        paint: { 'text-color': '#ffffff', 'text-halo-color': ['get', 'colour'], 'text-halo-width': 2 },
+      })
+      map.on('click', LAYER_ID, (event) => {
+        const id = Number(event.features?.[0]?.properties?.relationId)
+        if (Number.isFinite(id)) setSelectedId(id)
+      })
+      map.on('mouseenter', LAYER_ID, () => {
+        map.getCanvas().style.cursor = 'pointer'
+      })
+      map.on('mouseleave', LAYER_ID, () => {
+        map.getCanvas().style.cursor = ''
+      })
       void loadLines()
     })
     map.on('moveend', () => {
@@ -128,6 +155,8 @@ export function MapView() {
     }
   }, [])
 
+  const selected = known.find((route) => route.id === selectedId)
+
   // Inline style: MapLibre's own stylesheet sets position: relative on the
   // container with the same specificity, which would collapse the map to 0px.
   return (
@@ -135,6 +164,9 @@ export function MapView() {
       <div ref={container} className="map" style={{ position: 'absolute', inset: 0 }} />
       {zoomedOut && <p className="zoom-hint">Zoom in to see lines.</p>}
       {loading && !zoomedOut && !loadError && <p className="zoom-hint">Loading lines…</p>}
+      {selected && (
+        <LineCard line={selected} variants={lineVariants(known, selected.id)} onClose={() => setSelectedId(null)} />
+      )}
       {loadError && (
         <div className="map-notice" role="alert">
           <span>{loadError}</span>
