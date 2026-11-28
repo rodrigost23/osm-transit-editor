@@ -17,6 +17,7 @@ import { routesInView } from '@/core/data/lines'
 import { describeError, RouteLoader } from '@/core/data/route-loader'
 import { LayeredStore, MemoryStore } from '@/core/data/store'
 import { formatHash, parseHash } from '@/core/map/position'
+import { LOCATE_TIMEOUT_MS, LOCATE_ZOOM, locateErrorMessage } from '@/core/map/locate'
 import { baseStyleUrl } from './base-style'
 
 // MapLibre 6 resolves its worker next to its own module, which a bundler does
@@ -50,6 +51,49 @@ const BADGE_MIN_ZOOM = 12
 const STOP_MIN_ZOOM = 14
 // Wait for the map to settle before querying, so a fast pan or zoom sends one request.
 const MOVE_DEBOUNCE_MS = 400
+// The locate button sits in the navigation control's corner, under the zoom and compass buttons.
+class LocateControl implements maplibregl.IControl {
+  private container: HTMLDivElement | null = null
+  private button: HTMLButtonElement | null = null
+
+  private readonly onLocate: () => void
+  private readonly isLocating: () => boolean
+
+  constructor(onLocate: () => void, isLocating: () => boolean) {
+    this.onLocate = onLocate
+    this.isLocating = isLocating
+  }
+
+  onAdd(): HTMLElement {
+    this.container = document.createElement('div')
+    this.container.className = 'maplibregl-ctrl maplibregl-ctrl-group'
+    this.button = document.createElement('button')
+    this.button.type = 'button'
+    this.button.title = 'Show my location'
+    this.button.setAttribute('aria-label', 'Show my location')
+    this.button.className = 'locate-button'
+    this.button.innerHTML =
+      '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">' +
+      '<circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2.5" fill="currentColor"/>' +
+      '<path d="M12 1v3M12 20v3M1 12h3M20 12h3"/></svg>'
+    this.button.addEventListener('click', () => {
+      if (!this.isLocating()) this.onLocate()
+    })
+    this.container.appendChild(this.button)
+    return this.container
+  }
+
+  onRemove(): void {
+    this.container?.remove()
+    this.container = null
+    this.button = null
+  }
+
+  setBusy(busy: boolean): void {
+    if (this.button) this.button.disabled = busy
+  }
+}
+
 const emptyRoutes: RouteCollection = { type: 'FeatureCollection', features: [] }
 const emptyPoints: PointCollection = { type: 'FeatureCollection', features: [] }
 
@@ -73,6 +117,8 @@ export function MapView({ target, setKnown, setSelectedId, setVisible, reloadRef
   const [loading, setLoading] = useState(false)
   // What went wrong with the last load, or null when everything in view loaded.
   const [loadError, setLoadError] = useState<string | null>(null)
+  // What went wrong with the last locate request, or null.
+  const [locateError, setLocateError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!container.current) return
@@ -298,10 +344,54 @@ export function MapView({ target, setKnown, setSelectedId, setVisible, reloadRef
     })
     map.on('error', (event) => console.error('MapLibre error:', event.error))
     map.addControl(new maplibregl.NavigationControl(), 'top-right')
+
+    // The position is asked for only on a click, never on load. The marker is a small dot, not a pin.
+    let locating = false
+    let marker: maplibregl.Marker | null = null
+    let closed = false
+    const locateControl = new LocateControl(
+      () => {
+        if (!navigator.geolocation) {
+          setLocateError('Location is not available in this browser.')
+          return
+        }
+        locating = true
+        locateControl.setBusy(true)
+        setLocateError(null)
+        navigator.geolocation.getCurrentPosition(
+          (position) => {
+            locating = false
+            locateControl.setBusy(false)
+            if (closed) return
+            const { latitude: lat, longitude: lon } = position.coords
+            if (!marker) {
+              const element = document.createElement('div')
+              element.className = 'locate-marker'
+              element.setAttribute('aria-label', 'Your position')
+              marker = new maplibregl.Marker({ element }).setLngLat([lon, lat]).addTo(map)
+            } else {
+              marker.setLngLat([lon, lat])
+            }
+            map.flyTo({ center: [lon, lat], zoom: LOCATE_ZOOM })
+          },
+          (error) => {
+            locating = false
+            locateControl.setBusy(false)
+            if (closed) return
+            setLocateError(locateErrorMessage(error.code))
+          },
+          { enableHighAccuracy: false, timeout: LOCATE_TIMEOUT_MS, maximumAge: 60_000 },
+        )
+      },
+      () => locating,
+    )
+    map.addControl(locateControl, 'top-right')
     return () => {
+      closed = true
       clearTimeout(debounce)
       controller?.abort()
       mapRef.current = null
+      marker?.remove()
       map.remove()
     }
   }, [setKnown, setSelectedId, setVisible, reloadRef])
@@ -322,6 +412,11 @@ export function MapView({ target, setKnown, setSelectedId, setVisible, reloadRef
       {waitSeconds !== null && (
         <p className="zoom-hint" role="status">
           Rate limited by OpenStreetMap, retrying in {waitSeconds} s.
+        </p>
+      )}
+      {locateError && (
+        <p className="zoom-hint" role="alert">
+          {locateError}
         </p>
       )}
       {loadError && (

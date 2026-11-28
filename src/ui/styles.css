@@ -331,3 +331,32 @@ body {
 .maplibregl-ctrl-attrib {
   border-radius: 8px;
 }
+
+/* Locate-me button, in the navigation control's group. */
+.locate-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 29px;
+  height: 29px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+
+.locate-button:disabled {
+  cursor: progress;
+  opacity: 0.5;
+}
+
+/* Your position: a small dot, not a pin. */
+.locate-marker {
+  width: 14px;
+  height: 14px;
+  border: 2px solid #ffffff;
+  border-radius: 50%;
+  background: #1d6fd8;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25);
+}
