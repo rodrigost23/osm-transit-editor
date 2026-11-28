@@ -282,7 +282,18 @@ export class RouteLoader {
       if (timedOut) throw new TransportError(`no answer within ${REQUEST_TIMEOUT_MS / 1000} s`)
       if (error instanceof OsmHttpError) throw error
       // fetch() rejects with a TypeError when no response arrives: offline, blocked, or CORS.
-      if (error instanceof TypeError) throw new TransportError('network error (no response: offline, blocked, or CORS)')
+      // Log the real message so a failure before the request is sent is not mistaken for a network problem.
+      if (error instanceof TypeError) {
+        console.error('[osm] fetch rejected', {
+          url,
+          name: error.name,
+          message: error.message,
+          stack: error.stack,
+          online: globalThis.navigator?.onLine,
+          page: globalThis.location?.href,
+        })
+        throw new TransportError(`network error: ${error.message}`)
+      }
       throw error
     } finally {
       clearTimeout(timer)
