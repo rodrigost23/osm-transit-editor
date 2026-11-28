@@ -9,6 +9,10 @@ export interface Entry {
 export interface Store {
   get(key: string): Promise<Entry | undefined>
   set(key: string, entry: Entry): Promise<void>
+  /** Removes one entry. Optional: a store without it keeps entries until it forgets them. */
+  delete?(key: string): Promise<void>
+  /** Every entry whose key starts with the prefix. Optional: used once, to move old data to a new format. */
+  scan?(prefix: string): Promise<[string, Entry][]>
 }
 
 /** Keeps the most recently used entries in memory. */
@@ -37,6 +41,14 @@ export class MemoryStore implements Store {
       if (oldest === undefined) break
       this.items.delete(oldest)
     }
+  }
+
+  async delete(key: string): Promise<void> {
+    this.items.delete(key)
+  }
+
+  async scan(prefix: string): Promise<[string, Entry][]> {
+    return [...this.items].filter(([key]) => key.startsWith(prefix))
   }
 }
 
@@ -86,5 +98,15 @@ export class LayeredStore implements Store {
   async set(key: string, entry: Entry): Promise<void> {
     await this.memory.set(key, entry)
     await withTimeout(this.disk.set(key, entry).catch(() => undefined), this.diskTimeoutMs, undefined)
+  }
+
+  async delete(key: string): Promise<void> {
+    await this.memory.delete?.(key)
+    await withTimeout(this.disk.delete?.(key)?.catch(() => undefined) ?? Promise.resolve(), this.diskTimeoutMs, undefined)
+  }
+
+  async scan(prefix: string): Promise<[string, Entry][]> {
+    if (!this.disk.scan) return []
+    return withTimeout(this.disk.scan(prefix).catch(() => []), this.diskTimeoutMs, [])
   }
 }

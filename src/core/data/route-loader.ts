@@ -1,16 +1,14 @@
 import { type RouteSource, type Stop } from './geojson'
 import { parseOsmJson, type OsmData, type OsmWay } from './osm-json'
+import { areaOf, cellOf, intersects, segmentIndex, tilesIn, type Cell, type Segment } from './coverage'
 import { type Entry, type Store, MemoryStore } from './store'
-import { splitBox, tileBox, tilesCovering, type BoundingBox, type Tile } from './tiles'
+import { splitBox, tileBox, type BoundingBox, type Tile } from './tiles'
 
 // OpenStreetMap asks API clients to keep to two simultaneous requests.
 // One request to the OSM API at a time. Queued requests start in the order they were asked for.
 const CONCURRENCY = 1
-// Only the tiles nearest the map centre are loaded, so panning is not met with a flood of requests.
-// The tiles nearest the centre are loaded at once: the centre tile and its two nearest neighbours.
+// Only the tiles nearest the map centre are loaded at once, so panning is not met with a flood of requests.
 const NEAREST_TILES = 3
-// Zoomed out, the cache is read for up to this many tiles nearest the centre. Reads are local, but a wide view has many tiles.
-const CACHED_TILES = 64
 const REQUEST_TIMEOUT_MS = 30_000
 // Network errors and timeouts are retried with a growing delay, for up to this long.
 const RETRY_WINDOW_MS = 60_000
@@ -23,17 +21,25 @@ const MAX_COOLDOWN_MS = 15 * 60_000
 const STREAK_WINDOW_MS = 10 * 60_000
 // The cooldown is kept in local storage, so reloading the page does not send requests during it.
 const COOLDOWN_KEY = 'osm-api-cooldown'
-// A saved route is refreshed in the background this long after it is shown, so a burst of views does not refresh everything at once.
+// Saved data is refreshed in the background this long after it is shown, so a burst of views does not refresh everything at once.
 const REFRESH_DELAY_MS = 5_000
 const COOLING_STATUS = new Set([429, 503, 509])
 // A box the API refuses as too large is split into quarters, up to this many levels deeper.
 const MAX_SPLIT_DEPTH = 4
-// Saved data is always shown when it is there. Only data older than this is refreshed, once, when its area is opened.
+// Saved data is always shown when it is there. Only data older than this is refreshed in the background.
 const STALE_MS = 7 * 24 * 60 * 60 * 1000
-// Part of every cache key. Keep it stable: a change drops everything saved. Saved routes without stations are refreshed once instead.
-const FORMAT_VERSION = 'v1'
 // Cooldowns are waited out, and retried this many times at most. They do not count against the retry window.
 const MAX_COOLING_RETRIES = 2
+/** Saved routes and coverage may take this many bytes. The least recently used are removed beyond it. */
+export const DEFAULT_BUDGET_BYTES = 40 * 1024 * 1024
+// Format of the saved data. Version 1 (one entry per quarter of a tile) is read once, moved, and removed.
+const FORMAT = 'v2'
+const INDEX_KEY = `index/${FORMAT}`
+const ROUTE_PREFIX = `route/${FORMAT}/`
+const CELL_PREFIX = `cell/${FORMAT}/`
+const LEGACY_ROUTE_PREFIX = 'route/v1/'
+const LEGACY_TILE_PREFIX = 'v1/'
+const TILE_ZOOM = 14
 
 export class OsmHttpError extends Error {
   readonly status: number
@@ -75,11 +81,42 @@ export interface LoaderOptions {
   onCooldown?: (until: number) => void
   /** Overpass mirrors, in order of preference. Used only when the OSM API cannot answer. */
   overpassUrls?: string[]
+  /** Size limit for saved routes and coverage. Defaults to DEFAULT_BUDGET_BYTES. */
+  budgetBytes?: number
 }
 
 interface Cooldown {
   until: number
   streak: number
+}
+
+interface RouteMeta {
+  bytes: number
+  used: number
+  box?: BoundingBox
+}
+
+interface CellMeta {
+  bytes: number
+  used: number
+}
+
+/** What is saved beside the data: how big each entry is and when it was last used. Kept in memory and saved as one entry. */
+interface Index {
+  routes: Record<string, RouteMeta>
+  cells: Record<string, CellMeta>
+  migrated?: boolean
+}
+
+interface LoadedCell {
+  cell: Cell
+  at: Map<number, Segment>
+}
+
+/** Routes asked for during one load. A refresh asks the API once per route, not once per view of the tiles. */
+interface LoadContext {
+  refresh: boolean
+  done: Set<number>
 }
 
 /** Local storage when the browser gives it, otherwise none: the cooldown then lasts for this page only. */
@@ -153,6 +190,23 @@ export function relationRoute(data: OsmData, id: number): RouteSource {
   return { id, tags: relation.tags, lines, ways, stops }
 }
 
+/** The box that holds every line of a route, or nothing when it has no lines. */
+function routeBox(route: RouteSource): BoundingBox | undefined {
+  let west = Infinity
+  let south = Infinity
+  let east = -Infinity
+  let north = -Infinity
+  for (const line of route.lines) {
+    for (const [lon, lat] of line) {
+      west = Math.min(west, lon)
+      east = Math.max(east, lon)
+      south = Math.min(south, lat)
+      north = Math.max(north, lat)
+    }
+  }
+  return Number.isFinite(west) ? { west, south, east, north } : undefined
+}
+
 export function mapUrl(apiUrl: string, box: BoundingBox): string {
   // The API takes the bounds as left, bottom, right, top.
   const bbox = [box.west, box.south, box.east, box.north].join(',')
@@ -210,7 +264,7 @@ export interface LoadOptions {
   /** Ask the API again for the box and its routes, even when they are saved. */
   refresh?: boolean
   /**
-   * Ask the Overpass mirrors first, with one query for the whole box. Used at zoom levels
+   * Ask the Overpass mirrors first, with one query for the missing part of the box. Used at zoom levels
    * below the OSM API's line zoom, where its tile-sized requests would be too many.
    */
   overpassFirst?: boolean
@@ -221,13 +275,25 @@ function outdatedRoute(value: unknown): boolean {
   return !('stops' in (value as object)) || !('ways' in (value as object))
 }
 
+function isRoute(value: unknown): value is RouteSource {
+  return typeof value === 'object' && value !== null && Array.isArray((value as RouteSource).lines)
+}
+
+/** Tiles nearest a centre first. */
+function byDistance(centre: { lat: number; lon: number }) {
+  return (a: Tile, b: Tile) => distance(centreOf(tileBox(a)), centre) - distance(centreOf(tileBox(b)), centre)
+}
+
 /**
- * Loads subway routes for the visible area. Each tile is split into quarters, and the
- * quarters nearest the centre are asked for first. The map is redrawn as each quarter
- * arrives. A failing request is reported, and the rest still loads.
+ * Loads subway routes for the visible area, and keeps what it fetched.
  *
- * Results are kept in a store: fresh results are used as they are, older ones are shown
- * at once and refreshed in the background. Failed or partial results are never kept.
+ * What is kept: each route once, with the box it covers; and, per tile, which
+ * requests covered it and which route IDs they found. A view asks only for the tiles
+ * it does not cover yet, so going back to an area needs no request, whatever the zoom.
+ * The least recently used data is removed when the size limit is reached.
+ *
+ * Fresh data is used as it is. Older data is shown at once and refreshed in the
+ * background. Failed or partial requests are never kept.
  */
 export class RouteLoader {
   private readonly apiUrl: string
@@ -238,10 +304,18 @@ export class RouteLoader {
   private readonly storage: CooldownStorage | undefined
   private readonly onCooldown: ((until: number) => void) | undefined
   private readonly overpassUrls: string[]
+  private readonly budgetBytes: number
   private active = 0
   private readonly waiting: (() => void)[] = []
   private readonly refreshing = new Set<string>()
+  private readonly inflight = new Map<number, Promise<RouteSource>>()
   private pausedUntil = 0
+  private index: Index | undefined
+  private opened: Promise<Index> | undefined
+  private indexDirty = false
+  private readonly cells = new Map<string, LoadedCell>()
+  // Writes to routes and coverage run one after another, so a read-modify-write of one cell cannot interleave.
+  private chain: Promise<void> = Promise.resolve()
 
   constructor(apiUrl: string, options: LoaderOptions = {}) {
     this.apiUrl = apiUrl
@@ -253,6 +327,7 @@ export class RouteLoader {
     this.storage = options.storage ?? defaultStorage()
     this.onCooldown = options.onCooldown
     this.overpassUrls = options.overpassUrls ?? []
+    this.budgetBytes = options.budgetBytes ?? DEFAULT_BUDGET_BYTES
     this.pausedUntil = this.readCooldown()?.until ?? 0
   }
 
@@ -268,126 +343,159 @@ export class RouteLoader {
     onUpdate?: (result: LoadResult) => void,
     options: LoadOptions = {},
   ): Promise<LoadResult> {
-    if (options.overpassFirst && this.overpassUrls.length > 0) {
-      return this.loadFromMirrors(box, signal, onUpdate, options.refresh)
+    throwIfCancelled(signal)
+    try {
+      if (options.overpassFirst && this.overpassUrls.length > 0) {
+        return await this.loadFromMirrors(box, signal, onUpdate, options.refresh)
+      }
+      return await this.loadFromOsm(box, signal, onUpdate, options.refresh)
+    } finally {
+      await this.flush()
     }
-    const centre = centreOf(box)
-    const tiles = tilesCovering(box)
-      .sort((a, b) => distance(centreOf(tileBox(a)), centre) - distance(centreOf(tileBox(b)), centre))
-      .slice(0, NEAREST_TILES)
-    const quarters = tiles
-      .flatMap((tile) => splitBox(tileBox(tile)).map((part, index) => ({ key: `${FORMAT_VERSION}/${tileKey(tile)}/${index}`, box: part })))
-      .sort((a, b) => distance(centreOf(a.box), centre) - distance(centreOf(b.box), centre))
+  }
 
-    const routes = new Map<number, RouteSource>()
+  /**
+   * The saved routes whose box crosses the view, without any request. Used where the map
+   * does not load lines, so that routes saved earlier show as soon as the map opens.
+   */
+  async cached(box: BoundingBox, signal: AbortSignal): Promise<RouteSource[]> {
+    throwIfCancelled(signal)
+    const index = await this.ready()
+    const ids = Object.entries(index.routes)
+      .filter(([, meta]) => meta.box !== undefined && intersects(meta.box, box))
+      .map(([id]) => Number(id))
+    const saved = await Promise.all(ids.map((id) => this.store.get(routeKey(id)).catch(() => undefined)))
+    throwIfCancelled(signal)
+    return saved.flatMap((entry) => (entry && isRoute(entry.value) ? [entry.value] : []))
+  }
+
+  private async loadFromOsm(box: BoundingBox, signal: AbortSignal, onUpdate?: (result: LoadResult) => void, refresh = false): Promise<LoadResult> {
+    const index = await this.ready()
+    const tiles = tilesIn(box)
+    const centre = centreOf(box)
     const failures: LoadFailure[] = []
     const reported = new Set<string>()
-    const pending = new Map<number, Promise<RouteSource>>()
     const report = (failure: LoadFailure) => {
       if (reported.has(failure.url)) return
       reported.add(failure.url)
       failures.push(failure)
     }
-    // A route shared by several quarters is asked for once.
-    const routeFor = (id: number): Promise<RouteSource> => {
-      let promise = pending.get(id)
-      if (!promise) {
-        promise = this.remember(`route/${FORMAT_VERSION}/${id}`, signal, (s) => this.fetchRoute(id, s), {
-          force: options.refresh,
-          outdated: outdatedRoute,
-        })
-        pending.set(id, promise)
-      }
-      return promise
+    const ctx: LoadContext = { refresh, done: new Set() }
+    const onRouteError = (id: number, error: unknown) => {
+      if (!signal.aborted) report({ kind: 'relation', url: relationFullUrl(this.apiUrl, id), reason: describeError(error) })
+    }
+    const show = async (): Promise<RouteSource[]> => {
+      const routes = await this.routesFor(tiles, signal, ctx, (id, s) => this.fetchRouteOsm(id, s), onRouteError)
+      if (!signal.aborted && onUpdate) onUpdate({ routes, failures: [...failures] })
+      return routes
     }
 
+    const uncovered = refresh ? tiles : await this.uncovered(tiles)
+    if (!refresh) this.refreshStale(index, tiles)
+    const missing = uncovered.sort(byDistance(centre)).slice(0, NEAREST_TILES)
     await Promise.all(
-      quarters.map(async (quarter) => {
-        let ids: number[]
-        try {
-          ids = await this.remember(quarter.key, signal, (s) => this.fetchQuarter(quarter.box, s, 0), { force: options.refresh })
-        } catch (error) {
-          if (!signal.aborted) report({ kind: 'map', url: mapUrl(this.apiUrl, quarter.box), reason: describeError(error) })
-          return
-        }
-        await Promise.all(
-          ids.map(async (id) => {
-            try {
-              routes.set(id, await routeFor(id))
-            } catch (error) {
-              if (!signal.aborted) report({ kind: 'relation', url: relationFullUrl(this.apiUrl, id), reason: describeError(error) })
-            }
-          }),
-        )
-        if (!signal.aborted && onUpdate) onUpdate({ routes: [...routes.values()], failures: [...failures] })
+      missing.map(async (tile) => {
+        const ids = await this.fetchTile(tile, signal, (url, error) => report({ kind: 'map', url, reason: describeError(error) }))
+        if (ids && !signal.aborted) await this.markCovered(index, [tile], ids, this.now())
+        if (!signal.aborted) await show()
       }),
     )
+    const routes = await show()
     throwIfCancelled(signal)
-    return { routes: [...routes.values()], failures }
+    return { routes, failures }
   }
 
   /**
-   * The routes already in the store for the box, whatever their age, without any request. Used
-   * where the map does not load lines, so that routes saved earlier show as soon as the map opens.
+   * Loads the missing part of the box from the Overpass mirrors: one query for the whole missing area,
+   * which gives IDs only. The details come from the OSM API. Nothing is asked again for covered tiles.
    */
-  async cached(box: BoundingBox, signal: AbortSignal): Promise<RouteSource[]> {
-    const centre = centreOf(box)
-    const tiles = tilesCovering(box)
-      .sort((a, b) => distance(centreOf(tileBox(a)), centre) - distance(centreOf(tileBox(b)), centre))
-      .slice(0, CACHED_TILES)
-    const ids = new Set<number>()
-    await Promise.all(
-      tiles.flatMap((tile) =>
-        splitBox(tileBox(tile)).map(async (_, index) => {
-          const saved = await this.store.get(`${FORMAT_VERSION}/${tileKey(tile)}/${index}`)
-          for (const id of (saved?.value as number[] | undefined) ?? []) ids.add(id)
-        }),
-      ),
-    )
+  private async loadFromMirrors(box: BoundingBox, signal: AbortSignal, onUpdate?: (result: LoadResult) => void, refresh = false): Promise<LoadResult> {
+    const index = await this.ready()
+    const tiles = tilesIn(box)
+    const failures: LoadFailure[] = []
+    const reported = new Set<string>()
+    const report = (failure: LoadFailure) => {
+      if (reported.has(failure.url)) return
+      reported.add(failure.url)
+      failures.push(failure)
+    }
+    const missing = refresh ? tiles : await this.uncovered(tiles)
+    if (missing.length > 0) {
+      // The query covers whole tiles, so every tile in the area is covered by its answer.
+      const area = areaOf(missing)
+      let ids: number[]
+      try {
+        ids = routeIdsFrom(await this.fromMirrors(overpassRouteIdsQuery(area), signal, new TransportError('Overpass first')))
+      } catch (error) {
+        if (signal.aborted) throw cancelled()
+        failures.push({ kind: 'map', url: this.overpassUrls[0], reason: describeError(error) })
+        return { routes: [], failures }
+      }
+      await this.markCovered(index, tilesIn(area), ids, this.now())
+    }
+    const ctx: LoadContext = { refresh, done: new Set() }
+    const onRouteError = (_id: number, error: unknown) => {
+      if (!signal.aborted) report({ kind: 'relation', url: this.overpassUrls[0], reason: describeError(error) })
+    }
+    const fetchRoute = async (id: number, s: AbortSignal): Promise<RouteSource> => {
+      // The details come from the OSM API, as on the OSM path. Only the IDs came from Overpass.
+      const text = await this.request(relationFullUrl(this.apiUrl, id), s)
+      return relationRoute(parseOsmJson(text), id)
+    }
+    const routes = await this.routesFor(tiles, signal, ctx, fetchRoute, onRouteError)
+    if (!signal.aborted && onUpdate) onUpdate({ routes, failures: [...failures] })
     throwIfCancelled(signal)
-    const saved = await Promise.all([...ids].map((id) => this.store.get(`route/${FORMAT_VERSION}/${id}`)))
-    throwIfCancelled(signal)
-    return saved.flatMap((entry) => (entry ? [entry.value as RouteSource] : []))
+    return { routes, failures }
   }
 
-  /** Answers from the store when it can, and saves what it fetched when it succeeds. */
-  private async remember<T>(
-    key: string,
+  /** The routes of the covered tiles. Each is read from the store, or fetched when it is not saved yet. */
+  private async routesFor(
+    tiles: Tile[],
     signal: AbortSignal,
-    load: (signal: AbortSignal) => Promise<T>,
-    options: { force?: boolean; outdated?: (value: unknown) => boolean } = {},
-  ): Promise<T> {
-    const saved = options.force ? undefined : await this.store.get(key)
-    if (saved) {
-      // Shown as it is. The background refresh only runs for old data, never for data that is merely cached.
-      if (this.now() - saved.savedAt >= STALE_MS || options.outdated?.(saved.value)) void this.refresh(key, load)
-      return saved.value as T
-    }
-    const value = await load(signal)
-    this.save(key, value)
-    return value
+    ctx: LoadContext,
+    fetchRoute: (id: number, s: AbortSignal) => Promise<RouteSource>,
+    onError: (id: number, error: unknown) => void,
+  ): Promise<RouteSource[]> {
+    const index = await this.ready()
+    await this.loadCellsFor(tiles)
+    const ids = this.idsOf(tiles)
+    const found = await Promise.all(
+      ids.map(async (id) => {
+        try {
+          const force = ctx.refresh && !ctx.done.has(id)
+          const route = await this.routeFor(index, id, signal, force, fetchRoute)
+          ctx.done.add(id)
+          return route
+        } catch (error) {
+          onError(id, error)
+          return undefined
+        }
+      }),
+    )
+    return found.filter((route): route is RouteSource => route !== undefined)
   }
 
-  private async refresh<T>(key: string, load: (signal: AbortSignal) => Promise<T>): Promise<void> {
-    // One refresh per key at a time: the older copy is still stale after a view, so later views would ask again.
-    if (this.refreshing.has(key)) return
-    this.refreshing.add(key)
-    try {
-      await this.sleep(REFRESH_DELAY_MS, new AbortController().signal)
-      this.save(key, await load(new AbortController().signal))
-    } catch {
-      // The older copy stays in the store until a later load succeeds.
-    } finally {
-      this.refreshing.delete(key)
-    }
+  /**
+   * Asks the API for the route IDs of one tile. The tile is asked for in four quarters, as the
+   * API refuses larger boxes. Undefined when any quarter failed: the tile is then not kept as covered.
+   */
+  private async fetchTile(tile: Tile, signal: AbortSignal, fail: (url: string, error: unknown) => void): Promise<number[] | undefined> {
+    const results = await Promise.all(
+      splitBox(tileBox(tile)).map(async (part) => {
+        try {
+          return await this.fetchBox(part, signal, 0)
+        } catch (error) {
+          if (!signal.aborted) fail(mapUrl(this.apiUrl, part), error)
+          return undefined
+        }
+      }),
+    )
+    if (results.some((ids) => ids === undefined)) return undefined
+    return [...new Set(results.flatMap((ids) => ids ?? []))]
   }
 
-  private save(key: string, value: unknown): void {
-    const entry: Entry = { value, savedAt: this.now() }
-    void this.store.set(key, entry).catch(() => undefined)
-  }
-
-  private async fetchQuarter(box: BoundingBox, signal: AbortSignal, depth: number): Promise<number[]> {
+  /** Route IDs in a box. A box the API refuses as too large is split into quarters and asked for in parts. */
+  private async fetchBox(box: BoundingBox, signal: AbortSignal, depth: number): Promise<number[]> {
     try {
       return subwayRouteIds(parseOsmJson(await this.requestOrMirror(mapUrl(this.apiUrl, box), overpassMapQuery(box), signal)))
     } catch (error) {
@@ -395,7 +503,7 @@ export class RouteLoader {
       if (error instanceof OsmHttpError && error.status === 400 && depth < MAX_SPLIT_DEPTH) {
         const ids = new Set<number>()
         for (const part of splitBox(box)) {
-          for (const id of await this.fetchQuarter(part, signal, depth + 1)) ids.add(id)
+          for (const id of await this.fetchBox(part, signal, depth + 1)) ids.add(id)
         }
         return [...ids]
       }
@@ -403,70 +511,319 @@ export class RouteLoader {
     }
   }
 
-  private async fetchRoute(id: number, signal: AbortSignal): Promise<RouteSource> {
+  private async fetchRouteOsm(id: number, signal: AbortSignal): Promise<RouteSource> {
     const text = await this.requestOrMirror(relationFullUrl(this.apiUrl, id), overpassRelationQuery(id), signal)
     return relationRoute(parseOsmJson(text), id)
   }
 
-  /**
-   * Loads the box from the Overpass mirrors: one query for the subway relations in the box,
-   * then one per route. Nothing is kept in the store, so these results are always fresh.
-   */
-  private async loadFromMirrors(
-    box: BoundingBox,
+  /** A route from the store when it is saved, otherwise from the network. Concurrent asks for one route share one request. */
+  private routeFor(index: Index, id: number, signal: AbortSignal, force: boolean, fetchRoute: (id: number, s: AbortSignal) => Promise<RouteSource>): Promise<RouteSource> {
+    const pending = this.inflight.get(id)
+    if (pending) return pending
+    const task = this.resolveRoute(index, id, signal, force, fetchRoute).finally(() => this.inflight.delete(id))
+    this.inflight.set(id, task)
+    return task
+  }
+
+  private async resolveRoute(
+    index: Index,
+    id: number,
     signal: AbortSignal,
-    onUpdate?: (result: LoadResult) => void,
-    refresh = false,
-  ): Promise<LoadResult> {
-    const routes = new Map<number, RouteSource>()
-    const failures: LoadFailure[] = []
-    const mirrorFailure = new TransportError('Overpass first')
-    // The z14 quarters wholly inside the box are saved under the same keys the OSM path uses.
-    // When every one of them is saved, the box is answered from the store and no query is sent.
-    const inside = tilesCovering(box).flatMap((tile) =>
-      splitBox(tileBox(tile))
-        .map((part, index) => ({ key: `${FORMAT_VERSION}/${tileKey(tile)}/${index}`, part }))
-        .filter(({ part }) => within(part, box)),
-    )
-    let ids: number[] | undefined
-    if (!refresh && inside.length > 0) {
-      const saved = await Promise.all(inside.map(({ key }) => this.store.get(key)))
-      if (saved.every((entry) => entry !== undefined)) {
-        ids = [...new Set(saved.flatMap((entry) => (entry?.value as number[] | undefined) ?? []))]
+    force: boolean,
+    fetchRoute: (id: number, s: AbortSignal) => Promise<RouteSource>,
+  ): Promise<RouteSource> {
+    if (!force && index.routes[id]) {
+      const saved = await this.store.get(routeKey(id)).catch(() => undefined)
+      if (saved && isRoute(saved.value)) {
+        index.routes[id].used = this.now()
+        this.indexDirty = true
+        if (this.now() - saved.savedAt >= STALE_MS || outdatedRoute(saved.value)) void this.refreshRoute(index, id, fetchRoute)
+        return saved.value
       }
     }
-    if (ids === undefined) {
-      try {
-        const text = await this.fromMirrors(overpassRouteIdsQuery(box), signal, mirrorFailure)
-        ids = routeIdsFrom(text)
-      } catch (error) {
-        if (signal.aborted) throw cancelled()
-        failures.push({ kind: 'map', url: this.overpassUrls[0], reason: describeError(error) })
-        return { routes: [], failures }
-      }
-      // The query covered each quarter entirely, so its routes are the ones the quarter needs.
-      for (const { key } of inside) this.save(key, ids)
-    }
-    const found = ids
-    await Promise.all(
-      found.map(async (id) => {
-        try {
-          routes.set(
-            id,
-            await this.remember(`route/${FORMAT_VERSION}/${id}`, signal, async (s) => {
-              // The details come from the OSM API, as on the OSM path. Only the IDs came from Overpass.
-              const text = await this.request(relationFullUrl(this.apiUrl, id), s)
-              return relationRoute(parseOsmJson(text), id)
-            }, { force: refresh, outdated: outdatedRoute }),
-          )
-        } catch (error) {
-          if (!signal.aborted) failures.push({ kind: 'relation', url: this.overpassUrls[0], reason: describeError(error) })
-        }
-        if (!signal.aborted && onUpdate) onUpdate({ routes: [...routes.values()], failures: [...failures] })
-      }),
-    )
     throwIfCancelled(signal)
-    return { routes: [...routes.values()], failures }
+    const value = await fetchRoute(id, signal)
+    await this.saveRoute(index, id, value, this.now())
+    return value
+  }
+
+  private async refreshRoute(index: Index, id: number, fetchRoute: (id: number, s: AbortSignal) => Promise<RouteSource>): Promise<void> {
+    const key = routeKey(id)
+    // One refresh per route at a time: the older copy is still stale after a view, so later views would ask again.
+    if (this.refreshing.has(key)) return
+    this.refreshing.add(key)
+    try {
+      await this.sleep(REFRESH_DELAY_MS, new AbortController().signal)
+      await this.saveRoute(index, id, await fetchRoute(id, new AbortController().signal), this.now())
+    } catch {
+      // The older copy stays saved until a later load succeeds.
+    } finally {
+      this.refreshing.delete(key)
+      void this.flush()
+    }
+  }
+
+  /** Refreshes, in the background, the covered tiles of the view whose coverage is old. The view shows them meanwhile. */
+  private refreshStale(index: Index, tiles: Tile[]): void {
+    const stale = tiles.filter((tile) => {
+      const segment = this.segmentOf(tile)
+      return segment !== undefined && this.now() - segment.s >= STALE_MS
+    })
+    for (const tile of stale.slice(0, NEAREST_TILES)) void this.refreshTile(index, tile)
+  }
+
+  private async refreshTile(index: Index, tile: Tile): Promise<void> {
+    const key = `tile/${tile.x}/${tile.y}`
+    if (this.refreshing.has(key)) return
+    this.refreshing.add(key)
+    try {
+      await this.sleep(REFRESH_DELAY_MS, new AbortController().signal)
+      const ids = await this.fetchTile(tile, new AbortController().signal, () => undefined)
+      if (ids) await this.markCovered(index, [tile], ids, this.now())
+    } catch {
+      // The older coverage stays until a later load succeeds.
+    } finally {
+      this.refreshing.delete(key)
+      void this.flush()
+    }
+  }
+
+  /** The tiles that no saved request covers. */
+  private async uncovered(tiles: Tile[]): Promise<Tile[]> {
+    await this.loadCellsFor(tiles)
+    return tiles.filter((tile) => this.segmentOf(tile) === undefined)
+  }
+
+  private segmentOf(tile: Tile): Segment | undefined {
+    const { key, offset } = cellOf(tile)
+    return this.cells.get(key)?.at.get(offset)
+  }
+
+  /** The route IDs found for the covered tiles. Needs loadCellsFor first. */
+  private idsOf(tiles: Tile[]): number[] {
+    const ids = new Set<number>()
+    for (const tile of tiles) {
+      const segment = this.segmentOf(tile)
+      if (segment) for (const id of segment.i) ids.add(id)
+    }
+    return [...ids]
+  }
+
+  private async loadCellsFor(tiles: Tile[]): Promise<void> {
+    const keys = new Set(tiles.map((tile) => cellOf(tile).key))
+    await Promise.all([...keys].map((key) => this.loadCell(key)))
+  }
+
+  private async loadCell(key: string): Promise<void> {
+    // Not ready(): this runs inside the migration, which the readiness promise waits for.
+    const index = this.index
+    if (!index) return
+    const known = this.cells.get(key)
+    if (known) {
+      if (index.cells[key]) {
+        index.cells[key].used = this.now()
+        this.indexDirty = true
+      }
+      return
+    }
+    const saved = await this.store.get(cellStoreKey(key)).catch(() => undefined)
+    // A write may have loaded the cell while this read was waiting: its copy is the newer one.
+    if (!saved || this.cells.has(key)) return
+    const cell = saved.value as Cell
+    if (!cell || !Array.isArray(cell.segs)) return
+    this.cells.set(key, { cell, at: segmentIndex(cell) })
+    if (!index.cells[key]) {
+      index.cells[key] = { bytes: JSON.stringify(cell).length, used: this.now() }
+      this.indexDirty = true
+    }
+  }
+
+  /** Records that the tiles were covered by a request that found these route IDs. */
+  private markCovered(index: Index, tiles: Tile[], ids: number[], savedAt: number): Promise<void> {
+    return this.serial(async () => {
+      const byCell = new Map<string, number[]>()
+      for (const tile of tiles) {
+        const { key, offset } = cellOf(tile)
+        byCell.set(key, [...(byCell.get(key) ?? []), offset])
+      }
+      for (const [key, offsets] of byCell) {
+        await this.loadCell(key)
+        const current = this.cells.get(key)?.cell ?? { segs: [] }
+        const fresh = new Set(offsets)
+        // A tile belongs to one segment: the newest request that covered it.
+        const kept = current.segs
+          .map((segment) => ({ ...segment, t: segment.t.filter((offset) => !fresh.has(offset)) }))
+          .filter((segment) => segment.t.length > 0)
+        await this.writeCell(index, key, { segs: [...kept, { t: offsets, i: ids, s: savedAt }] })
+      }
+    })
+  }
+
+  private async writeCell(index: Index, key: string, cell: Cell): Promise<void> {
+    this.cells.set(key, { cell, at: segmentIndex(cell) })
+    index.cells[key] = { bytes: JSON.stringify(cell).length, used: this.now() }
+    this.indexDirty = true
+    await this.put(cellStoreKey(key), cell, this.now())
+  }
+
+  private saveRoute(index: Index, id: number, value: RouteSource, savedAt: number): Promise<void> {
+    return this.serial(async () => {
+      index.routes[id] = { bytes: JSON.stringify(value).length, used: this.now(), box: routeBox(value) }
+      this.indexDirty = true
+      await this.put(routeKey(id), value, savedAt)
+    })
+  }
+
+  /** Removes the least recently used routes and coverage while they take more than the budget. */
+  private async enforceBudget(index: Index): Promise<void> {
+    type Item = { kind: 'route' | 'cell'; key: string; bytes: number; used: number }
+    const items: Item[] = [
+      ...Object.entries(index.routes).map(([key, meta]): Item => ({ kind: 'route', key, bytes: meta.bytes, used: meta.used })),
+      ...Object.entries(index.cells).map(([key, meta]): Item => ({ kind: 'cell', key, bytes: meta.bytes, used: meta.used })),
+    ]
+    let total = items.reduce((sum, item) => sum + item.bytes, 0)
+    if (total <= this.budgetBytes) return
+    items.sort((a, b) => a.used - b.used)
+    for (const item of items) {
+      if (total <= this.budgetBytes) break
+      total -= item.bytes
+      this.indexDirty = true
+      if (item.kind === 'route') {
+        delete index.routes[item.key]
+        await this.drop(routeKey(Number(item.key)))
+      } else {
+        delete index.cells[item.key]
+        this.cells.delete(item.key)
+        await this.drop(cellStoreKey(item.key))
+      }
+    }
+  }
+
+  private ready(): Promise<Index> {
+    this.opened ??= this.open()
+    return this.opened
+  }
+
+  private async open(): Promise<Index> {
+    const saved = await this.store.get(INDEX_KEY).catch(() => undefined)
+    const stored = saved?.value as Partial<Index> | undefined
+    const index: Index = stored && stored.routes && stored.cells ? (stored as Index) : { routes: {}, cells: {} }
+    this.index = index
+    if (!index.migrated) {
+      try {
+        await this.migrate(index)
+      } catch {
+        // Nothing is removed unless the move finished. The next page load tries again.
+      }
+    }
+    return index
+  }
+
+  /** Moves version 1 entries (one per route, and one per quarter of a tile) into the current format, then removes them. */
+  private async migrate(index: Index): Promise<void> {
+    const entries: [string, Entry][] = (await this.store.scan?.('')) ?? []
+    const legacy: string[] = []
+    const quarters = new Map<string, { ids: (number[] | undefined)[]; saved: number }>()
+    for (const [key, entry] of entries) {
+      if (key.startsWith(LEGACY_ROUTE_PREFIX)) {
+        legacy.push(key)
+        const id = Number(key.slice(LEGACY_ROUTE_PREFIX.length))
+        if (Number.isFinite(id) && isRoute(entry.value)) await this.saveRoute(index, id, entry.value, entry.savedAt)
+      } else if (key.startsWith(LEGACY_TILE_PREFIX)) {
+        legacy.push(key)
+        const [, zoom, x, y, quarter] = key.split('/')
+        if (zoom !== String(TILE_ZOOM) || !Array.isArray(entry.value)) continue
+        const tileKeyText = `${x}/${y}`
+        const slot = quarters.get(tileKeyText) ?? { ids: [undefined, undefined, undefined, undefined], saved: entry.savedAt }
+        const part = Number(quarter)
+        if (part >= 0 && part < 4) slot.ids[part] = entry.value as number[]
+        slot.saved = Math.min(slot.saved, entry.savedAt)
+        quarters.set(tileKeyText, slot)
+      }
+    }
+    // A tile is covered when all four of its quarters were saved.
+    for (const [tileKeyText, slot] of quarters) {
+      if (!slot.ids.every((ids) => Array.isArray(ids))) continue
+      const [x, y] = tileKeyText.split('/').map(Number)
+      const ids = [...new Set(slot.ids.flatMap((part) => part ?? []))]
+      await this.markCovered(index, [{ x, y, z: TILE_ZOOM }], ids, slot.saved)
+    }
+    for (const key of legacy) await this.drop(key)
+    index.migrated = true
+    this.indexDirty = true
+    await this.flush()
+  }
+
+  /**
+   * Applies the size limit and saves the index. Runs when a load ends, not during it, so a
+   * load never loses data it has just fetched.
+   */
+  private async flush(): Promise<void> {
+    if (!this.index) return
+    await this.enforceBudget(this.index)
+    if (!this.indexDirty) return
+    this.indexDirty = false
+    await this.put(INDEX_KEY, this.index, this.now())
+  }
+
+  /** Writes that never fail the load: a store that refuses a write just keeps nothing. */
+  private async put(key: string, value: unknown, savedAt: number): Promise<void> {
+    try {
+      await this.store.set(key, { value, savedAt })
+    } catch {
+      // The data is still used for this page.
+    }
+  }
+
+  private async drop(key: string): Promise<void> {
+    try {
+      await this.store.delete?.(key)
+    } catch {
+      // A key that cannot be removed is ignored.
+    }
+  }
+
+  /** Runs one write after the previous one has finished. */
+  private serial<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.chain.then(task, task)
+    this.chain = run.then(
+      () => undefined,
+      () => undefined,
+    )
+    return run
+  }
+
+  /** Starts a cooldown after a rate limit or overload. Requests made meanwhile wait for it, and it survives a reload. */
+  private cool(retryAfter: number): void {
+    const now = this.now()
+    const previous = this.readCooldown()
+    // Requests that fail together start one cooldown, not one each. Only a new rate limit after the last one escalates it.
+    if (previous && now < previous.until) return
+    const streak = previous && now - previous.until < STREAK_WINDOW_MS ? previous.streak + 1 : 1
+    const ms = Math.min(Math.max(retryAfter, MIN_COOLDOWN_MS) * 2 ** (streak - 1), MAX_COOLDOWN_MS)
+    const until = now + ms
+    this.pausedUntil = Math.max(this.pausedUntil, until)
+    this.writeCooldown({ until, streak })
+    this.onCooldown?.(until)
+  }
+
+  private readCooldown(): Cooldown | undefined {
+    try {
+      const raw = this.storage?.getItem(COOLDOWN_KEY)
+      if (!raw) return undefined
+      const value = JSON.parse(raw) as Partial<Cooldown>
+      return Number.isFinite(value.until) && Number.isFinite(value.streak) ? (value as Cooldown) : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  private writeCooldown(cooldown: Cooldown): void {
+    try {
+      this.storage?.setItem(COOLDOWN_KEY, JSON.stringify(cooldown))
+    } catch {
+      // Storage is full or blocked: the cooldown still applies to this page.
+    }
   }
 
   /** The OSM API first. If it cannot answer, the Overpass mirrors are tried in order. */
@@ -554,39 +911,6 @@ export class RouteLoader {
     }
   }
 
-  /** Starts a cooldown after a rate limit or overload. Requests made meanwhile wait for it, and it survives a reload. */
-  private cool(retryAfter: number): void {
-    const now = this.now()
-    const previous = this.readCooldown()
-    // Requests that fail together start one cooldown, not one each. Only a new rate limit after the last one escalates it.
-    if (previous && now < previous.until) return
-    const streak = previous && now - previous.until < STREAK_WINDOW_MS ? previous.streak + 1 : 1
-    const ms = Math.min(Math.max(retryAfter, MIN_COOLDOWN_MS) * 2 ** (streak - 1), MAX_COOLDOWN_MS)
-    const until = now + ms
-    this.pausedUntil = Math.max(this.pausedUntil, until)
-    this.writeCooldown({ until, streak })
-    this.onCooldown?.(until)
-  }
-
-  private readCooldown(): Cooldown | undefined {
-    try {
-      const raw = this.storage?.getItem(COOLDOWN_KEY)
-      if (!raw) return undefined
-      const value = JSON.parse(raw) as Partial<Cooldown>
-      return Number.isFinite(value.until) && Number.isFinite(value.streak) ? (value as Cooldown) : undefined
-    } catch {
-      return undefined
-    }
-  }
-
-  private writeCooldown(cooldown: Cooldown): void {
-    try {
-      this.storage?.setItem(COOLDOWN_KEY, JSON.stringify(cooldown))
-    } catch {
-      // Storage is full or blocked: the cooldown still applies to this page.
-    }
-  }
-
   /** Runs a request once a slot is free and any cooldown is over. A slot passes straight to the next waiting request. */
   private async limited<T>(signal: AbortSignal, task: () => Promise<T>): Promise<T> {
     if (this.active < CONCURRENCY) this.active++
@@ -603,6 +927,14 @@ export class RouteLoader {
       else this.active--
     }
   }
+}
+
+function routeKey(id: number): string {
+  return `${ROUTE_PREFIX}${id}`
+}
+
+function cellStoreKey(key: string): string {
+  return `${CELL_PREFIX}${key}`
 }
 
 /** Seconds from Retry-After, in milliseconds. Browsers only expose the header when the server allows it. */
@@ -625,11 +957,6 @@ function routeIdsFrom(text: string): number[] {
   return (data.elements ?? []).filter((element) => element.type === 'relation' && typeof element.id === 'number').map((element) => element.id as number)
 }
 
-/** True when a lies wholly inside b. */
-function within(a: BoundingBox, b: BoundingBox): boolean {
-  return a.west >= b.west && a.east <= b.east && a.south >= b.south && a.north <= b.north
-}
-
 function centreOf(box: BoundingBox): { lat: number; lon: number } {
   return { lat: (box.south + box.north) / 2, lon: (box.west + box.east) / 2 }
 }
@@ -637,8 +964,4 @@ function centreOf(box: BoundingBox): { lat: number; lon: number } {
 /** Squared distance in degrees. Only used to put things in order, so the projection does not matter. */
 function distance(a: { lat: number; lon: number }, b: { lat: number; lon: number }): number {
   return (a.lat - b.lat) ** 2 + (a.lon - b.lon) ** 2
-}
-
-function tileKey({ x, y, z }: Tile): string {
-  return `${z}/${x}/${y}`
 }
