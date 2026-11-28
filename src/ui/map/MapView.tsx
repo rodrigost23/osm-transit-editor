@@ -13,7 +13,7 @@ import {
   type RouteSource,
 } from '@/core/data/geojson'
 import { IndexedDbStore } from '@/core/data/idb-store'
-import { lineVariants } from '@/core/data/lines'
+import { lineVariants, routesInView } from '@/core/data/lines'
 import { describeError, RouteLoader } from '@/core/data/route-loader'
 import { LayeredStore, MemoryStore } from '@/core/data/store'
 import { formatHash, parseHash } from '@/core/map/position'
@@ -61,9 +61,11 @@ interface MapViewProps {
   /** The line the user picked, on the map or in the search. */
   selectedId: number | null
   setSelectedId: Dispatch<SetStateAction<number | null>>
+  /** The routes with a point in the visible area, for the list of lines on screen. */
+  setVisible: Dispatch<SetStateAction<RouteSource[]>>
 }
 
-export function MapView({ target, known, setKnown, selectedId, setSelectedId }: MapViewProps) {
+export function MapView({ target, known, setKnown, selectedId, setSelectedId, setVisible }: MapViewProps) {
   const container = useRef<HTMLDivElement>(null)
   const mapRef = useRef<maplibregl.Map | null>(null)
   const retry = useRef<() => void>(() => {})
@@ -90,6 +92,13 @@ export function MapView({ target, known, setKnown, selectedId, setSelectedId }: 
     let controller: AbortController | undefined
     const drawn = new RouteChangeTracker()
     const seen = new Map<number, RouteSource>()
+    // The routes on screen, from the routes loaded so far.
+    const publishVisible = () => {
+      const bounds = map.getBounds()
+      setVisible(
+        routesInView([...seen.values()], { south: bounds.getSouth(), west: bounds.getWest(), north: bounds.getNorth(), east: bounds.getEast() }),
+      )
+    }
     const loader = new RouteLoader(config.osmApiUrl, {
       store: new LayeredStore(new MemoryStore(300), new IndexedDbStore()),
       onCooldown: (until) => setWaitSeconds(Math.ceil((until - Date.now()) / 1000)),
@@ -107,6 +116,7 @@ export function MapView({ target, known, setKnown, selectedId, setSelectedId }: 
         overview?.setData(linesToGeoJSON(routes))
         badges?.setData(badgesToGeoJSON(routes))
         stops?.setData(stopsToGeoJSON(routes))
+        publishVisible()
       }
       controller?.abort()
       if (map.getZoom() < config.minLineZoom) {
@@ -272,6 +282,7 @@ export function MapView({ target, known, setKnown, selectedId, setSelectedId }: 
     })
     map.on('moveend', () => {
       writeHash()
+      publishVisible()
       clearTimeout(debounce)
       debounce = setTimeout(() => void loadLines(), MOVE_DEBOUNCE_MS)
     })
@@ -283,7 +294,7 @@ export function MapView({ target, known, setKnown, selectedId, setSelectedId }: 
       mapRef.current = null
       map.remove()
     }
-  }, [setKnown, setSelectedId])
+  }, [setKnown, setSelectedId, setVisible])
 
   // A place or line chosen in the search moves the map there. The map then loads the lines of the new view.
   useEffect(() => {

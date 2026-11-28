@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { lineColour, lineName, lineVariants, routeCentre, searchLines } from '@/core/data/lines'
+import { groupLines, lineColour, lineName, lineVariants, routeCentre, routesInView } from '@/core/data/lines'
 import type { RouteSource } from '@/core/data/geojson'
 
 const route = (id: number, tags: Record<string, string>): RouteSource => ({ id, tags, lines: [] })
@@ -27,17 +27,20 @@ describe('line helpers', () => {
   })
 })
 
-describe('search and centre', () => {
+describe('centre, grouping and view', () => {
   const routes = [
     { id: 2, tags: { name: 'Linha 2', ref: '2', operator: 'Metrô Rio' }, lines: [] },
     { id: 1, tags: { name: 'Linha 1', ref: '1', operator: 'Metrô Rio' }, lines: [[[-43.2, -22.9], [-43.0, -22.8]]] },
     { id: 3, tags: { name: 'Linha 1 Variante', ref: '1', operator: 'Metrô Rio' }, lines: [] },
   ] as RouteSource[]
 
-  it('finds a line by name, ref or operator, ignoring case and accents, one result per line', () => {
-    expect(searchLines(routes, 'LINHA 1').map((route) => route.id)).toEqual([1])
-    expect(searchLines(routes, 'metro').map((route) => route.id)).toEqual([1, 2])
-    expect(searchLines(routes, '  ')).toEqual([])
+  it('groups routes by line, in id order', () => {
+    expect(groupLines(routes).map((group) => group.map((route) => route.id))).toEqual([[1, 3], [2]])
+  })
+
+  it('keeps routes with a point inside the box', () => {
+    expect(routesInView(routes, { south: -23, north: -22.85, west: -43.3, east: -43.1 }).map((route) => route.id)).toEqual([1])
+    expect(routesInView(routes, { south: 0, north: 1, west: 0, east: 1 })).toEqual([])
   })
 
   it('finds the middle of a route, and none for a route without points', () => {

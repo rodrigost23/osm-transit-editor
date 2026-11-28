@@ -26,26 +26,21 @@ export function lineKey(route: RouteSource): string {
   return [route.tags.ref, route.tags.network, route.tags.operator].map((value) => value ?? '').join('|')
 }
 
-/** Lower case, without accents, so that "metro" finds "Metrô". */
-function fold(text: string): string {
-  return text.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase()
+/** The routes of each line, in id order: one line per ref, network and operator. */
+export function groupLines(routes: readonly RouteSource[]): RouteSource[][] {
+  const groups = new Map<string, RouteSource[]>()
+  for (const route of [...routes].sort((a, b) => a.id - b.id)) {
+    const key = lineKey(route)
+    groups.set(key, [...(groups.get(key) ?? []), route])
+  }
+  return [...groups.values()]
 }
 
-/** One route per line whose name, ref or operator contains the text. */
-export function searchLines(routes: readonly RouteSource[], query: string, limit = 8): RouteSource[] {
-  const needle = fold(query.trim())
-  if (!needle) return []
-  const found: RouteSource[] = []
-  const keys = new Set<string>()
-  for (const route of [...routes].sort((a, b) => a.id - b.id)) {
-    const haystack = fold([lineName(route), route.tags.ref, route.tags.operator].join(' '))
-    const key = lineKey(route)
-    if (!haystack.includes(needle) || keys.has(key)) continue
-    keys.add(key)
-    found.push(route)
-    if (found.length >= limit) break
-  }
-  return found
+/** The routes with at least one point inside the box. */
+export function routesInView(routes: readonly RouteSource[], box: { south: number; west: number; north: number; east: number }): RouteSource[] {
+  return routes.filter((route) =>
+    route.lines.some((line) => line.some(([lon, lat]) => lat >= box.south && lat <= box.north && lon >= box.west && lon <= box.east)),
+  )
 }
 
 /** The middle of a route's points, or null when it has none. */

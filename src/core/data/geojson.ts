@@ -1,5 +1,5 @@
 import { resolveColour } from './colour'
-import { lineKey } from './lines'
+import { groupLines } from './lines'
 
 /** A station or platform of a route, as one point. */
 export interface Stop {
@@ -126,21 +126,11 @@ function badgePoint(route: RouteSource): [number, number] | null {
   return longest[Math.floor(longest.length / 2)]
 }
 
-/** The routes of each line, in id order: one line per ref, network and operator. */
-function groupByLine(routes: readonly RouteSource[]): RouteSource[][] {
-  const groups = new Map<string, RouteSource[]>()
-  for (const route of [...routes].sort((a, b) => a.id - b.id)) {
-    const key = lineKey(route)
-    groups.set(key, [...(groups.get(key) ?? []), route])
-  }
-  return [...groups.values()]
-}
-
 /** One round badge per line, carrying its ref, in the line's colour. */
 export function badgesToGeoJSON(routes: readonly RouteSource[]): PointCollection {
   return {
     type: 'FeatureCollection',
-    features: groupByLine(routes).flatMap((group) => {
+    features: groupLines(routes).flatMap((group) => {
       const point = badgePoint({ id: 0, tags: {}, lines: group.flatMap((route) => route.lines) })
       if (!point) return []
       const { colour } = resolveColour(group[0].tags.colour)
@@ -162,7 +152,7 @@ export function badgesToGeoJSON(routes: readonly RouteSource[]): PointCollection
 export function linesToGeoJSON(routes: readonly RouteSource[]): RouteCollection {
   return {
     type: 'FeatureCollection',
-    features: groupByLine(routes).flatMap((group) => {
+    features: groupLines(routes).flatMap((group) => {
       const seen = new Set<number>()
       const coordinates: [number, number][][] = []
       for (const route of group) {
