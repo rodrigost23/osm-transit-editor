@@ -44,6 +44,7 @@ const BADGE_TEXT_ID = 'transit-badges-ref'
 const BADGE_MODE_ID = 'transit-badges-mode'
 const STOP_SOURCE_ID = 'transit-stops'
 const STOP_LAYER_ID = 'transit-stops-circle'
+const STOP_ALL_LAYER_ID = 'transit-stops-all-circle'
 const STOP_LABEL_ID = 'transit-stops-name'
 // Badges are too crowded to read below this zoom.
 const BADGE_MIN_ZOOM = 12
@@ -278,13 +279,15 @@ export function MapView({ target, setKnown, setSelectedId, setVisible, reloadRef
         layout: { 'line-cap': 'round', 'line-join': 'round' },
         paint: { 'line-color': ['get', 'colour'], 'line-width': 6 },
       })
-      // Stations sit under the badges, and are named from STOP_MIN_ZOOM on.
+      // Stations sit under the badges. Zoomed out, one dot per station; from STOP_MIN_ZOOM on, one dot
+      // per stop, so a station served by parallel tracks shows a dot on each.
       map.addLayer({
         id: STOP_LAYER_ID,
         type: 'circle',
         source: STOP_SOURCE_ID,
-        // Dots show from the visible zoom on, names from STOP_MIN_ZOOM.
         minzoom: config.lineVisibleZoom,
+        maxzoom: STOP_MIN_ZOOM,
+        filter: ['==', ['get', 'primary'], 'true'],
         paint: {
           'circle-radius': ['interpolate', ['linear'], ['zoom'], config.lineVisibleZoom, 2, STOP_MIN_ZOOM, 4],
           'circle-color': '#ffffff',
@@ -293,11 +296,24 @@ export function MapView({ target, setKnown, setSelectedId, setVisible, reloadRef
         },
       })
       map.addLayer({
+        id: STOP_ALL_LAYER_ID,
+        type: 'circle',
+        source: STOP_SOURCE_ID,
+        minzoom: STOP_MIN_ZOOM,
+        paint: {
+          'circle-radius': 4,
+          'circle-color': '#ffffff',
+          'circle-stroke-color': ['get', 'colour'],
+          'circle-stroke-width': 2,
+        },
+      })
+      // Names are set on the first stop of each name only, so a station is named once.
+      map.addLayer({
         id: STOP_LABEL_ID,
         type: 'symbol',
         source: STOP_SOURCE_ID,
         minzoom: STOP_MIN_ZOOM,
-        layout: { 'text-field': ['get', 'name'], 'text-font': ['Noto Sans Regular'], 'text-size': 11, 'text-offset': [0, 0.9], 'text-anchor': 'top' },
+        layout: { 'text-field': ['get', 'label'], 'text-font': ['Noto Sans Regular'], 'text-size': 11, 'text-offset': [0, 0.9], 'text-anchor': 'top' },
         paint: { 'text-color': '#1d1d1f', 'text-halo-color': '#ffffff', 'text-halo-width': 1.5 },
       })
       // One round badge per line, carrying its ref in the line's colour, on the middle of its track.
